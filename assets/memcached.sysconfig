@@ -1,0 +1,48 @@
+# =============================================================
+# /etc/sysconfig/memcached — memcached 启动参数（systemd EnvironmentFile）
+#
+# 为什么是这种形式：memcached **没有配置文件**，参数只能从命令行给。
+# 因此这里沿用 EL7 官方 memcached 包的约定：把参数写成键值对，
+# 由 memcached.service 里的 ExecStart 展开：
+#
+#   ExecStart=@BIN_DIR@/memcached -p ${PORT} -u ${USER} -m ${CACHESIZE} \
+#                                -c ${MAXCONN} $OPTIONS
+#
+# 改完执行：sudo systemctl restart memcached
+# 查看生效参数：systemctl show memcached -p ExecStart
+#               或 ps -o args= -C memcached
+#
+# 常用排查：memcached -h 可列出全部参数（本文件只覆盖最常用的几个）。
+# =============================================================
+
+# 运行用户（memcached 以 root 启动后会降权到该用户；必须是已存在的系统用户）
+# 不要改成 root：缓存服务没有理由以最高权限运行。
+USER="memcached"
+
+# 监听端口
+PORT="11211"
+
+# 最大同时连接数
+MAXCONN="1024"
+
+# 可用内存上限（单位：MB）。按机器内存的 50%~70% 估算，切勿不设上限。
+CACHESIZE="64"
+
+# ---- 额外参数（安全基线与调优都写在这里）----
+# 默认只监听本机回环地址：memcached 无认证机制，直接暴露公网会被扫描并滥用
+# （既可能被当作缓存投毒目标，也可能被用作 UDP 反射放大攻击的跳板）。
+# 需要被其他机器访问时，先加防火墙白名单，再把监听地址改成内网地址：
+#   OPTIONS="-l 192.168.1.20"
+# 注意：不要用 0.0.0.0 裸奔；确实必须监听全部网卡时，务必配合防火墙 + SASL
+# （需以 --sasl yes 编译）。
+#
+# 其他常用参数（按需追加到 OPTIONS）：
+#   -U 0              关闭 UDP 端口（1.6 起默认已关闭；显式写上更保险）
+#   -t 4              工作线程数，默认 4；通常不需要超过 CPU 核数
+#   -k                锁定内存，避免换页抖动（需 LimitMEMLOCK，见 unit 文件）
+#   -M                内存耗尽时返回错误而不是淘汰（只适合当"真缓存+强一致"用）
+#   -o modern         启用现代调优预设（slab_reassign / slab_automove / lru 等）
+#   -o slab_reassign,slab_automove=1   细粒度控制 slab 重分配
+#   -o maxconns_fast  连接数打满时快速拒绝而不是入队（防止雪崩式延迟）
+#   -v / -vv          提高日志级别（排查问题时临时加）
+OPTIONS="-l 127.0.0.1"

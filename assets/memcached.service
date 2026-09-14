@@ -1,0 +1,64 @@
+# =============================================================
+# memcached systemd 单元模板（源码编译安装场景）
+#
+# 说明（重要）
+# ---------
+# memcached **没有配置文件**，所有参数都通过命令行给出。因此本单元的做法是：
+#   * 用 EnvironmentFile 读取 /etc/sysconfig/memcached（键值对形式，见同目录
+#     memcached.sysconfig），再用 ${PORT} / ${USER} / ${CACHESIZE} / ${MAXCONN} /
+#     $OPTIONS 拼出启动命令——这也是 EL7 官方 memcached 包的做法，便于运维沿用。
+#   * 需要加参数时不要直接改本文件，`systemctl edit memcached` 写 override 更稳
+#     （升级重新安装本单元时不会覆盖 override）：
+#         [Service]
+#         Environment=OPTIONS="-l 0.0.0.0 -U 0 -t 4"
+#
+# 部署（用 install.sh 会自动完成下列全部步骤）：
+#   sudo useradd -r -s /sbin/nologin memcached
+#   sudo install -m 0644 memcached.service   /etc/systemd/system/memcached.service
+#   sudo install -m 0644 memcached.sysconfig /etc/sysconfig/memcached
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now memcached
+#
+# 占位符说明：@BIN_DIR@ 由 install.sh 在安装时替换为实际二进制目录
+#   （默认 /usr/local/bin）。若手工部署，请自行替换为真实路径。
+# =============================================================
+[Unit]
+Description=memcached daemon
+Documentation=https://github.com/memcached/memcached/wiki
+After=network.target
+
+[Service]
+# 启动参数来自 /etc/sysconfig/memcached（memcached 本身没有配置文件）
+EnvironmentFile=/etc/sysconfig/memcached
+ExecStart=@BIN_DIR@/memcached -p ${PORT} -u ${USER} -m ${CACHESIZE} -c ${MAXCONN} $OPTIONS
+# 注：memcached 以 root 启动后由 -u ${USER} 自行降权（源码内 hard check：
+#     以 root 运行必须显式 -u），因此这里不写 User=，而是保留降权能力。
+
+# ---- 安全加固（CentOS 7 的 systemd 219 与麒麟 V10 的 243+ 均支持这些指令）----
+# 独立 /tmp 与 /var/tmp，避免与主机其他进程互相可见
+PrivateTmp=true
+# /usr、/boot、/etc 只读挂载
+ProtectSystem=full
+# 禁止进程及其子进程获取新的特权
+NoNewPrivileges=true
+# 独立 /dev 命名空间（只保留 /dev/null、/dev/zero、/dev/random 等伪设备）
+PrivateDevices=true
+# 降权 + 调整 rlimit 所需的 capability
+CapabilityBoundingSet=CAP_SETGID CAP_SETUID CAP_SYS_RESOURCE
+# 限制可用的地址族（memcached 只做 TCP/UDP/UNIX socket）
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# ---- 资源限制 ----
+# memcached 会按 -c（maxconns）自行上调 RLIMIT_NOFILE，这里给出足够的上限底数
+LimitNOFILE=65535
+# 如需锁定内存（memcached -k，避免换页影响尾延迟），放开下面两行
+# LimitMEMLOCK=infinity
+# （并在 OPTIONS 中加 -k）
+
+# 异常退出后自动拉起；systemd 默认的启动频率限制（StartLimitBurst）会阻止
+# 「配置写错导致反复重启」演变成无限重启风暴。
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

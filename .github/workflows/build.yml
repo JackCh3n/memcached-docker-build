@@ -1,0 +1,370 @@
+# =============================================================================
+# memcached-docker-build · GitHub Actions 构建流水线（多架构）
+#
+# 分支与版本语义（本文件位于 main 分支）：
+#   - 主线版本：push 到 main / master 自动构建默认版本（x86_64 + aarch64），
+#     发布到固定 Release 标签 `latest`（每次覆盖更新）
+#   - 稳定版本：打 git tag（vMemcached-1.6.45）触发，从 tag 名解析版本，
+#     发布到同名 tag（固化）
+#   - 手动触发：workflow_dispatch 可指定任意版本 / libevent 模式 / 架构
+#
+# 架构说明：
+#   x86_64  -> ubuntu-latest 原生构建，基础镜像 centos:7.6.1810（glibc 2.17）
+#   aarch64 -> ubuntu-24.04-arm 原生 ARM runner，基础镜像 arm64v8/centos:7（glibc 2.17）
+#              产物可在 glibc >= 2.17 的 aarch64 系统运行，含银河麒麟 V10 SP3
+#
+#   注意：`ubuntu-24.04-arm` 目前仅对 public 仓库免费；若仓库为 private，
+#   请把 aarch64 的 runner 改回 `ubuntu-latest` 并把 qemu 置为 "true"。
+#
+# 产物形态（与 redis-docker-build 的关键差异）：
+#   * memcached 的唯一外部依赖 libevent 在镜像内**静态编译**并静态链接，
+#     因此产物不依赖任何 libevent 动态库——EL7 的 libevent-2.0.so.5 在麒麟 V10
+#     （libevent 2.1.x）上并不存在，动态链接会导致搬过去起不来。
+#   * 产物 tar.gz 内除 memcached / memcached-tool / man 手册外，还包含
+#     install.sh / memcached.service / memcached.sysconfig，即「自包含、可离线一键安装」。
+#
+# TLS 说明（重要）：
+#   memcached 的 --enable-tls 要求 OpenSSL >= 1.1.0，而 EL7 只有 1.0.2k，
+#   因此**本流水线不产出 TLS 版本**。需要 TLS 请在目标机原生编译：
+#       ./build-native.sh 1.6.45 system yes      # 麒麟 V10 SP3 / UOS / EL8+ 自带 OpenSSL 1.1.1
+# =============================================================================
+name: build-memcached
+
+on:
+  workflow_dispatch:
+    inputs:
+      memcached-version:
+        description: "memcached 版本号（如 1.6.45 / 1.5.22）"
+        required: false
+        default: "1.6.45"
+      libevent:
+        description: "libevent 链接方式 auto|static|system（默认 static，产物无 libevent 依赖）"
+        required: false
+        default: "auto"
+      sasl:
+        description: "是否编译 SASL 认证 yes|no（需 cyrus-sasl-devel）"
+        required: false
+        default: "no"
+      seccomp:
+        description: "是否启用 seccomp 限制 yes|no（需 libseccomp-devel，memcached>=1.5.16）"
+        required: false
+        default: "no"
+      tls:
+        description: "TLS 仅支持目标机原生编译（容器内 OpenSSL 1.0.2k < 1.1.0），填 yes 会直接报错"
+        required: false
+        default: "no"
+      arch:
+        description: "构建架构 all|x86_64|aarch64"
+        required: false
+        default: "all"
+      smoke:
+        description: "是否执行 version + set/get 冒烟测试 yes|no"
+        required: false
+        default: "yes"
+  push:
+    branches: [main, master]
+    tags: ["vMemcached-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 解析构建场景与版本（供矩阵复用） ──────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      scene: ${{ steps.resolve.outputs.scene }}
+      version: ${{ steps.resolve.outputs.version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      libevent: ${{ steps.resolve.outputs.libevent }}
+      sasl: ${{ steps.resolve.outputs.sasl }}
+      seccomp: ${{ steps.resolve.outputs.seccomp }}
+      smoke: ${{ steps.resolve.outputs.smoke }}
+    steps:
+      - id: resolve
+        name: 解析场景与版本
+        run: |
+          set -e
+          DEFAULT_VERSION="1.6.45"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.memcached-version }}"; V="${V:-$DEFAULT_VERSION}"
+            L="${{ github.event.inputs.libevent }}";        L="${L:-auto}"
+            SA="${{ github.event.inputs.sasl }}";           SA="${SA:-no}"
+            SE="${{ github.event.inputs.seccomp }}";        SE="${SE:-no}"
+            S="${{ github.event.inputs.smoke }}";           S="${S:-yes}"
+            echo "scene=dispatch"                >> "$GITHUB_OUTPUT"
+            echo "version=$V"                    >> "$GITHUB_OUTPUT"
+            echo "release_tag=vMemcached-$V"     >> "$GITHUB_OUTPUT"
+            echo "libevent=$L"                   >> "$GITHUB_OUTPUT"
+            echo "sasl=$SA"                      >> "$GITHUB_OUTPUT"
+            echo "seccomp=$SE"                   >> "$GITHUB_OUTPUT"
+            echo "smoke=$S"                      >> "$GITHUB_OUTPUT"
+            echo ">>> 场景: 手动构建，版本=$V，libevent=$L"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            REF="${{ github.ref_name }}"
+            case "$REF" in
+              vMemcached-*) V="${REF#vMemcached-}" ;;
+              *) echo "::error::未知 tag 格式: $REF（应为 vMemcached-x.y.z）"; exit 1 ;;
+            esac
+            echo "scene=tag"                     >> "$GITHUB_OUTPUT"
+            echo "version=$V"                    >> "$GITHUB_OUTPUT"
+            echo "release_tag=$REF"              >> "$GITHUB_OUTPUT"
+            echo "libevent=auto"                 >> "$GITHUB_OUTPUT"
+            echo "sasl=no"                       >> "$GITHUB_OUTPUT"
+            echo "seccomp=no"                    >> "$GITHUB_OUTPUT"
+            echo "smoke=yes"                     >> "$GITHUB_OUTPUT"
+            echo ">>> 场景: 稳定版构建，tag=$REF，版本=$V"
+          else
+            echo "scene=mainline"                >> "$GITHUB_OUTPUT"
+            echo "version=$DEFAULT_VERSION"      >> "$GITHUB_OUTPUT"
+            echo "release_tag=latest"            >> "$GITHUB_OUTPUT"
+            echo "libevent=auto"                 >> "$GITHUB_OUTPUT"
+            echo "sasl=no"                       >> "$GITHUB_OUTPUT"
+            echo "seccomp=no"                    >> "$GITHUB_OUTPUT"
+            echo "smoke=yes"                     >> "$GITHUB_OUTPUT"
+            echo ">>> 场景: 主线构建，版本=$DEFAULT_VERSION"
+          fi
+
+      # TLS 前置拦截：给出可操作的说明，而不是让 Docker 构建跑到一半才失败
+      - name: TLS 前置检查
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.tls == 'yes'
+        run: |
+          echo "::error::CI 无法产出 TLS 版本：memcached 的 --enable-tls 要求 OpenSSL >= 1.1.0，"
+          echo "::error::而 CentOS 7 / EL7 仓库只有 OpenSSL 1.0.2k。"
+          echo "::error::请在目标机（银河麒麟 V10 SP3 / UOS / EL8+，自带 OpenSSL 1.1.1）原生编译："
+          echo "::error::    ./build-native.sh <版本> system yes"
+          exit 1
+
+  # ── 构建（矩阵：x86_64 + aarch64） ─────────────────────────────────
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            base_image: centos:7.6.1810
+            platform: linux/amd64
+            qemu: "false"
+          # private 仓库请改为 runner: ubuntu-latest / qemu: "true"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            base_image: arm64v8/centos:7
+            platform: linux/arm64
+            qemu: "false"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 架构过滤（workflow_dispatch 可只构建单一架构）
+        id: filter
+        run: |
+          WANT="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.arch || 'all' }}"
+          WANT="${WANT:-all}"
+          if [ "$WANT" = "all" ] || [ "$WANT" = "${{ matrix.arch }}" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo ">>> 跳过 ${{ matrix.arch }}（本次只构建 $WANT）"
+          fi
+
+      # aarch64 在 x86_64 runner 上需要 QEMU
+      - name: 注册 QEMU（aarch64）
+        if: steps.filter.outputs.skip == 'false' && matrix.qemu == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: 准备 buildx
+        if: steps.filter.outputs.skip == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建编译镜像（EL7 + devtoolset-10 + 静态 libevent）
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          # SASL / seccomp 需要额外的 -devel 包；libevent 由 Dockerfile 内源码静态构建
+          OPT_DEPS=no
+          if [ "${{ needs.prepare.outputs.sasl }}" = "yes" ] || [ "${{ needs.prepare.outputs.seccomp }}" = "yes" ]; then
+            OPT_DEPS=yes
+          fi
+          echo ">>> INSTALL_OPT_DEPS=${OPT_DEPS}"
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --build-arg BASE_IMAGE=${{ matrix.base_image }} \
+            --build-arg INSTALL_OPT_DEPS="${OPT_DEPS}" \
+            -t memcached-builder:el7 --load .
+
+      - name: 编译 memcached ${{ needs.prepare.outputs.version }}（${{ matrix.arch }}）
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          mkdir -p dist
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$PWD/dist:/opt/dist" \
+            memcached-builder:el7 \
+            --memcached-version "${{ needs.prepare.outputs.version }}" \
+            --libevent "${{ needs.prepare.outputs.libevent }}" \
+            --sasl "${{ needs.prepare.outputs.sasl }}" \
+            --seccomp "${{ needs.prepare.outputs.seccomp }}" \
+            --smoke "${{ needs.prepare.outputs.smoke }}" \
+            --output /opt/dist
+
+      - name: 展示构建信息
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          for d in dist/*/; do
+            echo "===== $d ====="
+            cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 40 || true
+          done
+
+      - name: 装入 install.sh 与 assets（使产物包自包含）
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          # 注意：dist/<包目录> 是 docker 容器以 root 创建的，runner 用户无法直接写入，
+          # 所以这里必须用 sudo（CNB 侧 stage 本身以 root 运行，无需 sudo）
+          for d in dist/*/; do
+            [ -d "$d" ] || continue
+            sudo install -m 0755 install.sh                    "${d}install.sh"
+            sudo install -m 0644 assets/memcached.service      "${d}memcached.service"
+            sudo install -m 0644 assets/memcached.sysconfig    "${d}memcached.sysconfig"
+            # 项目自身许可证（MIT）；上游 memcached / libevent 许可证由 build-memcached.sh 生成
+            sudo install -m 0644 LICENSE                       "${d}LICENSE"
+          done
+          # 防御：dist 由容器内 root 写入。非 root 的 runner 在下一步 tar 打包时会
+          # Permission denied，这里统一放开读权限（a+rX 不会给二进制额外加执行位）。
+          sudo chmod -R a+rX dist/
+          ls -lh dist/*/
+
+      - name: 打包
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          cd dist
+          for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done
+          ls -lh *.tar.gz
+
+      - name: 上传产物（Workflow Artifact）
+        if: steps.filter.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: memcached-binaries-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          retention-days: 30
+
+  # ── 汇总发布 Release ──────────────────────────────────────────────
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部架构产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCENE: ${{ needs.prepare.outputs.scene }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          LIBEVENT_MODE: ${{ needs.prepare.outputs.libevent }}
+          SASL_FLAG: ${{ needs.prepare.outputs.sasl }}
+          SECCOMP_FLAG: ${{ needs.prepare.outputs.seccomp }}
+        run: |
+          set -e
+          ls -lh artifacts
+
+          X64="memcached-${VERSION}-x86_64.tar.gz"
+          ARM="memcached-${VERSION}-aarch64.tar.gz"
+          FILES=""
+          for f in "$X64" "$ARM"; do
+            if [ -f "artifacts/$f" ]; then
+              cp "artifacts/$f" "$f"
+              FILES="$FILES $f"
+            else
+              echo ">>> 未找到 $f，跳过"
+            fi
+          done
+          if [ -z "$FILES" ]; then
+            echo "::error::没有任何产物可发布"
+            exit 1
+          fi
+
+          case "$SCENE" in
+            mainline) TITLE="Mainline memcached (latest)" ;;
+            tag)      TITLE="Stable memcached ${VERSION}" ;;
+            *)        TITLE="memcached ${VERSION}" ;;
+          esac
+
+          cat > notes.md <<EOF
+          ## ${TITLE}
+
+          memcached ${VERSION}, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.
+
+          | Arch | Asset | Runs on |
+          |------|-------|---------|
+          | x86_64 | ${X64} | CentOS 7.6 / 7.9 及更高 |
+          | aarch64 | ${ARM} | glibc >= 2.17 的 aarch64（含银河麒麟 V10 SP3） |
+
+          - **libevent: statically linked** — 产物不依赖任何 libevent 动态库。
+            这一点很关键：EL7 的产物原本会链接 \`libevent-2.0.so.5\`，而麒麟 V10 / openEuler /
+            UOS 普遍是 \`libevent-2.1.so.6\` 甚至未安装 libevent，动态链接会直接起不来。
+          - libevent mode: \`${LIBEVENT_MODE}\`（镜像内以 \`--disable-shared --with-pic\` 源码构建）
+          - SASL: \`${SASL_FLAG}\`，seccomp: \`${SECCOMP_FLAG}\`，TLS: 未启用
+            （memcached TLS 要求 OpenSSL >= 1.1.0，EL7 只有 1.0.2k；需要 TLS 请用 \`build-native.sh\` 在目标机原生编译）
+          - Toolchain: CentOS 7 vault 归档源 + devtoolset-10（GCC 10.2）
+
+          ### 离线一键安装
+
+          每个包都是自包含的：解压后 \`sudo ./install.sh\` 即可安装或原地更新（自动比对版本、
+          备份旧二进制、创建 memcached 系统用户、安装 systemd 单元与 /etc/sysconfig/memcached）。
+
+          \`\`\`bash
+          tar xzf ${ARM}
+          cd ${ARM%.tar.gz}
+          sudo ./install.sh          # 安装 / 更新
+          ./install.sh --check       # 只看会做什么，不做改动
+          \`\`\`
+
+          包内含：\`memcached\`、\`memcached-tool\`（perl 运维脚本）、\`man/memcached.1\`、
+          \`install.sh\`、\`memcached.service\`、\`memcached.sysconfig\`、\`BUILD-INFO.txt\`，
+          以及 \`LICENSE\`（本项目 MIT）、\`LICENSE.memcached.txt\`、
+          \`LICENSE.libevent.txt\`（静态链接 libevent 时必须随包分发其许可证原文）。
+
+          > memcached 为 **BSD-3-Clause**，libevent 亦为 **BSD-3-Clause**。
+          EOF
+
+          publish() {
+            local tag="$1"
+            if gh release view "$tag" --json id -q .id >/dev/null 2>&1; then
+              echo ">>> Release $tag 已存在，更新附件"
+              gh release view "$tag" --json assets -q '.assets[]?.name' | while read -r f; do
+                [ -z "$f" ] && continue
+                aid=$(gh release view "$tag" --json assets -q ".assets[] | select(.name==\"$f\") | .id")
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${aid}" >/dev/null 2>&1 || true
+              done
+              for f in $FILES; do gh release upload "$tag" "$f" --clobber; done
+              gh release edit "$tag" --title "$TITLE" --notes-file notes.md --draft=false
+            else
+              # shellcheck disable=SC2086
+              gh release create "$tag" $FILES --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA"
+            fi
+          }
+
+          if [ "$SCENE" = "mainline" ]; then
+            publish "latest"
+          else
+            publish "$RELEASE_TAG"
+          fi
+
+      - name: 汇总
+        run: |
+          echo "场景        : $SCENE"
+          echo "memcached   : $VERSION"
+          echo "Release     : $RELEASE_TAG"
+          ls -lh *.tar.gz 2>/dev/null || true

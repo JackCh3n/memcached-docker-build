@@ -1,0 +1,281 @@
+# =============================================================================
+# memcached-docker-build · CNB (cnb.cool) 云原生构建流水线（x86_64 + aarch64 双架构）
+#
+# 架构策略
+# ---------
+#   x86_64  -> runner.tags: cnb:arch:amd64       节点，基础镜像 centos:7.6.1810
+#   aarch64 -> runner.tags: cnb:arch:arm64:v8   节点（CNB 原生 ARM，非 QEMU），
+#                                                基础镜像 arm64v8/centos:7
+#
+#   同一次 push / tag 会触发「两条并行流水线」，各自编译本架构产物。
+#   注意：runner 只能在流水线级别配置（Stage 级别不支持），所以同一套 stages
+#   通过 YAML 锚点被两条流水线复用——stages 内容是架构无关的。
+#
+# 发布策略
+# ---------
+#   两条流水线各自把「本架构」的 tar.gz 上传到**同一个** Release。
+#   因此 ensure-release 必须满足：
+#     1) 幂等：已存在则更新标题/描述，不重复创建
+#     2) 并发安全：两条流水线可能同时创建，409/422 视为已存在
+#   上传阶段只 glob 本流水线 workspace 下的 dist/*.tar.gz，天然互不覆盖。
+#
+# 分支与版本语义（与 GitHub Actions 一致）
+# ---------
+#   - 主线：main / master push        -> 固定 Release `latest`（滚动更新）
+#   - 稳定：git tag vMemcached-x.y.z  -> 同名 tag Release（固化）
+#
+# 构建产物形态（与 redis-docker-build 的关键差异）
+# ---------
+#   memcached 的唯一外部依赖 libevent 在镜像内**静态编译并静态链接**
+#   （--disable-shared --with-pic，见 Dockerfile）。原因：EL7 产物原本会链接
+#   libevent-2.0.so.5，而银河麒麟 V10 / openEuler / UOS 普遍是 libevent 2.1.x
+#   （libevent-2.1.so.6）甚至未安装，动态链接搬运过去会直接起不来。
+#   静态链接后产物动态依赖只剩 glibc，且必须随包附带 libevent 的 BSD-3-Clause
+#   许可证原文（build-memcached.sh 会自动生成 LICENSE.libevent.txt）。
+#
+# TLS 说明：memcached TLS 要求 OpenSSL >= 1.1.0，EL7 只有 1.0.2k，
+#   因此 CI 不产出 TLS 版本；需要 TLS 请用 build-native.sh 在目标机原生编译。
+# =============================================================================
+
+# ── 构建环境锚点（按架构各一份；runner 只能写在流水线级别） ────────────────
+# 注意：buildArgs 必须是 docker.build 的子节点（写成 docker 的子节点会被静默忽略，
+#       导致异架构仍拉取 Dockerfile 里的默认镜像而报
+#       "no match for platform in manifest"）。
+.build-env-amd64: &build-env-amd64
+  runner:
+    tags: cnb:arch:amd64
+    cpus: 8
+  docker:
+    build:
+      dockerfile: Dockerfile   # CentOS 7.6.1810 + devtoolset-10 + 静态 libevent
+      by:                      # 缓存 key 文件：依赖变更时重建环境
+        - Dockerfile
+        - build-memcached.sh
+      buildArgs:
+        BASE_IMAGE: centos:7.6.1810
+
+.build-env-arm64: &build-env-arm64
+  runner:
+    tags: cnb:arch:arm64:v8
+    cpus: 8
+  docker:
+    build:
+      dockerfile: Dockerfile
+      by:
+        - Dockerfile
+        - build-memcached.sh
+      buildArgs:
+        BASE_IMAGE: arm64v8/centos:7
+
+# 默认 memcached 版本（主线，当前最新稳定版）
+.vars: &vars
+  MEMCACHED_VERSION: "1.6.45"
+
+# 稳定版只认 vMemcached-* 标签。
+# ⚠️ 注意：CNB 的 `if` 字段**只支持 Stage / Job 级别**，写在 Pipeline 级别不生效
+#    （会被静默忽略），所以不能用 `if` 脚本来过滤 Tag。正确做法是在 tag_push 下用
+#    「Tag 名 glob」作为第一层键（见文件末尾「稳定版」一节）。
+
+# ── 统一阶段（两架构 + 主线/稳定版 共用） ──────────────────────────────────
+# 场景判定放在第一个 stage，通过 exports 把结果注入后续 stage 的环境变量。
+.stages: &stages
+  # 判定本次是「主线」还是「稳定版」，并解析版本号
+  - name: resolve-scene
+    script: |
+      set -e
+      REF="${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"
+      case "$REF" in
+        vMemcached-*)
+          V="${REF#vMemcached-}"
+          TAG="$REF"
+          TITLE="Stable memcached ${V}"
+          MK="false"
+          echo ">>> 场景: 稳定版构建（tag=${REF}，版本=${V}）"
+          ;;
+        *)
+          V="${MEMCACHED_VERSION:-1.6.45}"
+          TAG="latest"
+          TITLE="Mainline memcached (latest)"
+          MK="true"
+          echo ">>> 场景: 主线构建（ref=${REF}，版本=${V}）"
+          ;;
+      esac
+      echo "##[set-output TAG=${TAG}]"
+      echo "##[set-output TITLE=${TITLE}]"
+      echo "##[set-output VERSION=${V}]"
+      echo "##[set-output MK=${MK}]"
+    exports:
+      TAG: RELEASE_TAG
+      TITLE: RELEASE_TITLE
+      VERSION: RELEASE_VERSION
+      MK: RELEASE_MAKE_LATEST
+
+  # 编译（架构由流水线的 BASE_IMAGE 决定）
+  - name: build-memcached
+    script: |
+      set -e
+      echo ">>> 本流水线架构: $(uname -m)"
+      bash /usr/local/bin/build-memcached.sh \
+        --memcached-version "${RELEASE_VERSION}" \
+        --libevent auto \
+        --smoke yes \
+        --output "$PWD/dist"
+
+  - name: list-and-check
+    script: |
+      set -e
+      ls -lhR dist/
+      for d in dist/*/; do
+        echo "===== $d ====="
+        cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 30 || true
+      done
+
+  # 让压缩包「自包含」：把 install.sh 与 assets/ 一并放进产物目录
+  - name: bundle-installer
+    script: |
+      set -e
+      for d in dist/*/; do
+        [ -d "$d" ] || continue
+        install -m 0755 install.sh                  "${d}install.sh"
+        install -m 0644 assets/memcached.service    "${d}memcached.service"
+        install -m 0644 assets/memcached.sysconfig  "${d}memcached.sysconfig"
+        # 项目自身许可证（MIT）；上游 memcached / libevent 许可证由 build-memcached.sh 生成
+        install -m 0644 LICENSE                     "${d}LICENSE"
+      done
+      # 防御：dist 由容器内 root 写入。若打包者非 root，tar 会 Permission denied；
+      # 统一放开读权限（a+rX 不会给二进制额外加执行位）。CNB 阶段本身是 root，此处属一致性防御。
+      chmod -R a+rX dist/
+      ls -lh dist/*/
+
+  - name: package
+    script: |
+      set -e
+      cd dist
+      for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done
+      ls -lh *.tar.gz
+
+  # 生成 Release 说明（两条架构流水线内容一致，谁后写都不影响结果）
+  - name: gen-notes
+    script: |
+      set -e
+      printf '## %s\n\nmemcached %s, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.\n\n| Arch | Asset | Runs on |\n|------|-------|---------|\n| x86_64 | `memcached-%s-x86_64.tar.gz` | CentOS 7.6 / 7.9 and later |\n| aarch64 | `memcached-%s-aarch64.tar.gz` | aarch64 with glibc >= 2.17 (incl. Kylin V10 SP3) |\n\n- **libevent is statically linked** - the artifact has no runtime libevent dependency.\n  This matters: an EL7 build would otherwise link `libevent-2.0.so.5`, while Kylin V10 /\n  openEuler / UOS ship `libevent-2.1.so.6` or none at all, so the binary would fail to start.\n- Toolchain: CentOS 7 vault archive + devtoolset-10 (GCC 10.2); libevent built from source with `--disable-shared --with-pic`.\n- TLS: not enabled (memcached TLS requires OpenSSL >= 1.1.0, EL7 only has 1.0.2k).\n  Build natively on the target host with `build-native.sh <version> system yes` if you need TLS.\n\nEach tarball is self-contained: extract it and run `sudo ./install.sh` (offline install / in-place update).\nIt ships `install.sh`, `memcached.service`, `memcached.sysconfig`, `memcached-tool`, `man/memcached.1`,\n`BUILD-INFO.txt`, `LICENSE` (this project, MIT), `LICENSE.memcached.txt` and `LICENSE.libevent.txt`.\n\n> memcached is **BSD-3-Clause**; libevent is **BSD-3-Clause**.\n' \
+        "${RELEASE_TITLE}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" > RELEASE_NOTES.md
+      cat RELEASE_NOTES.md
+
+  # 幂等 + 并发安全地确保 Release 存在
+  - name: ensure-release
+    script: |
+      set -e
+      TAG="${RELEASE_TAG:?缺少 RELEASE_TAG}"
+      NAME="${RELEASE_TITLE:-$TAG}"
+      MK="${RELEASE_MAKE_LATEST:-false}"
+      API="https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases"
+      H_AUTH="Authorization: Bearer ${CNB_TOKEN}"
+      H_ACC="Accept: application/vnd.cnb.api+json"
+
+      # 从 releases 列表中提取指定 tag 的 release id
+      # 注意：CNB API 的 GET/POST/PATCH 都必须带 Accept: application/vnd.cnb.api+json，
+      #       只带 Content-Type 会返回 406
+      rel_id() {
+        curl -s -m 30 -H "$H_AUTH" -H "$H_ACC" "${API}" \
+          | tr -d ' \t\n' \
+          | grep -oE "\"id\":\"[0-9]+\",\"tag_name\":\"$1\"" \
+          | head -n 1 | grep -oE '[0-9]+' || true
+      }
+
+      BODY=$(sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g' RELEASE_NOTES.md)
+
+      echo ">>> 确保 Release 存在: ${TAG}（make_latest=${MK}）"
+      OK="no"
+      for attempt in 1 2 3 4 5; do
+        ID="$(rel_id "$TAG")"
+        if [ -n "$ID" ]; then
+          echo ">>> 已存在（id=${ID}），更新标题与描述"
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 30 -X PATCH \
+            -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+            "${API}/${ID}" \
+            -d "{\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"make_latest\":\"${MK}\"}") || HTTP="000"
+          echo ">>> PATCH 结果: HTTP ${HTTP}"
+          if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+            OK="yes"
+          else
+            echo ">>> 警告：描述更新失败，但附件仍可上传，继续"
+            OK="yes"
+          fi
+          break
+        fi
+
+        echo ">>> 不存在，创建（第 ${attempt} 次尝试）"
+        HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" -m 30 -X POST \
+          -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+          "${API}" \
+          -d "{\"tag_name\":\"${TAG}\",\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":false,\"make_latest\":\"${MK}\",\"target_commitish\":\"${CNB_COMMIT:-main}\"}") || HTTP="000"
+        echo ">>> POST 结果: HTTP ${HTTP}"
+        case "$HTTP" in
+          200|201) OK="yes"; break ;;
+          409|422)
+            # 另一条架构流水线抢先创建了，视为成功
+            echo ">>> 并发创建冲突，视为已存在"
+            OK="yes"; break ;;
+        esac
+        head -c 300 /tmp/rel.json 2>/dev/null || true
+        echo
+        echo ">>> 第 ${attempt} 次失败，3s 后重试"
+        sleep 3
+      done
+      if [ "$OK" != "yes" ]; then
+        echo "!!! Release 创建失败（tag=${TAG}）"
+        exit 1
+      fi
+      echo ">>> Release ${TAG} 就绪"
+
+  # 上传本架构产物（glob 只匹配本 workspace 的 dist，两架构互不覆盖）
+  - name: upload-attachments
+    image: cnbcool/attachments:latest
+    settings:
+      tag: ${RELEASE_TAG}
+      attachments:
+        - "./dist/*.tar.gz"
+
+# ── 主线：main / master 分支 push（两条流水线并行） ─────────────────────────
+main:
+  push:
+    - name: mainline-amd64
+      <<: *build-env-amd64
+      env:
+        <<: *vars
+      stages: *stages
+    - name: mainline-arm64
+      <<: *build-env-arm64
+      env:
+        <<: *vars
+      stages: *stages
+
+master:
+  push:
+    - name: mainline-amd64
+      <<: *build-env-amd64
+      env:
+        <<: *vars
+      stages: *stages
+    - name: mainline-arm64
+      <<: *build-env-arm64
+      env:
+        <<: *vars
+      stages: *stages
+
+# ── 稳定版：git tag 推送（两条流水线并行） ─────────────────────────────────
+# 说明：tag_push 的第一层键匹配的是 **Tag 名称**（支持 glob 与 `$` 兜底匹配）。
+#       这里用 glob "vMemcached-*"，只有版本 tag 才触发稳定版构建。
+# ⚠️ 不要写成兜底符 `$`：滚动发布会往仓库里生成 latest 这个 tag
+#    （创建 Release 时会连带建 tag），用 `$` 会把 latest 一并匹配进来，
+#    触发一次多余的完整构建（含 Dockerfile 构建）——既浪费构建节点，
+#    又可能因镜像源网络抖动而变红。
+"vMemcached-*":
+  tag_push:
+    - name: stable-amd64
+      <<: *build-env-amd64
+      stages: *stages
+    - name: stable-arm64
+      <<: *build-env-arm64
+      stages: *stages

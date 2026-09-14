@@ -328,14 +328,21 @@ CONFIGURE_FLAGS+=("--disable-coverage")
 
 # 静态链接 libevent 时，把线程相关库补在 -levent 之后（configure 会前置 -levent）。
 # 顺序有意义：静态库解析是「后者满足前者」，-levent_pthreads / -lpthread 必须在后。
+#
+# ⚠️ 必须**同时**把 -L<libevent>/lib 放进 LDFLAGS：
+#    configure 的第一项检查就是「C 编译器能否生成可执行文件」，该探测用 $LIBS 链接，
+#    而 -L<libevent>/lib 是后面 libevent 探测阶段才由 --with-libevent 追加的。
+#    若只给 LIBS 不给 -L，首个探测就会因找不到 -levent_pthreads 而失败，报
+#    「C compiler cannot create executables」（CI 上实测踩到过）。
 CONFIGURE_VARS=()
 if [ "$LIBEVENT_STATIC" = "yes" ]; then
   static_libs=""
   [ -f "${LIBEVENT_PREFIX}/lib/libevent_pthreads.a" ] && static_libs="-levent_pthreads"
   static_libs="${static_libs} -lpthread"
   # shellcheck disable=SC2086
+  CONFIGURE_VARS+=("LDFLAGS=-L${LIBEVENT_PREFIX}/lib")
   CONFIGURE_VARS+=("LIBS=$(echo $static_libs)")
-  echo ">>> 静态 libevent 附加链接库: ${static_libs}"
+  echo ">>> 静态 libevent 附加链接参数: LDFLAGS=-L${LIBEVENT_PREFIX}/lib LIBS=${static_libs}"
 fi
 
 # shellcheck disable=SC2086

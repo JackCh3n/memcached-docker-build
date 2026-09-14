@@ -141,6 +141,9 @@
         install -m 0644 assets/memcached.sysconfig  "${d}memcached.sysconfig"
         # 项目自身许可证（MIT）；上游 memcached / libevent 许可证由 build-memcached.sh 生成
         install -m 0644 LICENSE                     "${d}LICENSE"
+        # Windows 场景（WSL2 安装向导与说明），使产物包在 Windows 下同样自包含
+        rm -rf "${d}windows"
+        cp -r windows "${d}windows"
       done
       # 防御：dist 由容器内 root 写入。若打包者非 root，tar 会 Permission denied；
       # 统一放开读权限（a+rX 不会给二进制额外加执行位）。CNB 阶段本身是 root，此处属一致性防御。

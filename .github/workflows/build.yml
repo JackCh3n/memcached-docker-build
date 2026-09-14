@@ -231,6 +231,9 @@ jobs:
             sudo install -m 0644 assets/memcached.sysconfig    "${d}memcached.sysconfig"
             # 项目自身许可证（MIT）；上游 memcached / libevent 许可证由 build-memcached.sh 生成
             sudo install -m 0644 LICENSE                       "${d}LICENSE"
+            # Windows 场景（WSL2 安装向导与说明），使产物包在 Windows 下同样自包含
+            sudo rm -rf "${d}windows"
+            sudo cp -r windows "${d}windows"
           done
           # 防御：dist 由容器内 root 写入。非 root 的 runner 在下一步 tar 打包时会
           # Permission denied，这里统一放开读权限（a+rX 不会给二进制额外加执行位）。

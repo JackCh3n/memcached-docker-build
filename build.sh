@@ -106,6 +106,9 @@ bundle_and_package() {
     cp -f "${SCRIPT_DIR}/assets/memcached.sysconfig"  "${d}memcached.sysconfig"
     # 项目自身许可证（MIT）；上游 memcached / libevent 许可证由 build-memcached.sh 生成
     cp -f "${SCRIPT_DIR}/LICENSE"                     "${d}LICENSE"
+    # Windows 场景（WSL2 安装向导与说明），使产物包在 Windows 下同样自包含
+    rm -rf "${d}windows"
+    cp -a "${SCRIPT_DIR}/windows" "${d}windows"
   done
   echo ">>> 打包 tar.gz"
   ( cd "$DIST_DIR" && for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done )

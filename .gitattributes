@@ -11,3 +11,5 @@ Dockerfile text eol=lf
 *.sysconfig text eol=lf
 *.example text eol=lf
 *.1 text eol=lf
+# PowerShell 脚本带 UTF-8 BOM（否则 Windows PowerShell 5.1 会按 ANSI 读取导致解析失败）
+*.ps1 text eol=lf

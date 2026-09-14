@@ -397,6 +397,34 @@ sudo ./install.sh
 
 > 未解压时也可直接安装：`sudo ./install.sh --from memcached-1.6.45-aarch64.tar.gz`
 
+## Windows 环境（重要）
+
+**memcached 没有原生 Windows 版本，本项目也不提供 Windows 二进制。** 这是上游的限制，不是本项目的取舍——
+核对 1.6.45 源码可确认：仓库内**没有任何 Windows 构建文件**（无 `win32/`、无 `.sln`/`.vcxproj`、无
+`CMakeLists.txt`，根目录 121 个条目里一个都没有），核心代码依赖 POSIX 专属接口：
+
+| 位置 | 依赖的 POSIX 接口 |
+|---|---|
+| `daemon.c` | `fork()`、`setsid()` |
+| `thread.c` | `pthread_create` |
+| `memcached.c` | `sys/socket.h`、`sys/un.h`、`getpwnam`（`-u` 降权） |
+
+全仓仅 2 处 `#ifdef _WIN32`，且只是 1.4.x 时代非官方移植遗留的 `getsockopt` 类型转换。
+
+在 Windows 上跑 memcached 请走下面两条路，它们都**直接使用本项目的 Linux 产物**（无需额外构建）：
+
+| 方式 | 可用性 | 做法 |
+|---|---|---|
+| **WSL2（推荐）** | ✅ | `.\windows\memcached-wsl.ps1` 一条命令装完；x86_64 Windows 取 x86_64 包，ARM64 Windows 取 aarch64 包 |
+| **Docker Desktop** | ✅ | 把解压后的产物目录挂进任意 glibc 基础镜像（**不要**用 alpine/musl） |
+| Cygwin | ⚠️ 不支持 | 理论可编译，但上游不测试、需 `cygwin1.dll`，本项目无 CI 可验证，故**不提供**该构建路径 |
+
+产物只要求 `glibc ≥ 2.17`，WSL 里的 Ubuntu / Debian 系都满足。WSL2 默认开启 `localhostForwarding`，
+**Windows 上的客户端可直接连 `127.0.0.1:11211`**（端口见 `/etc/sysconfig/memcached`）。
+
+> 完整说明（systemd 启用、跨机访问排查、Docker 示例、常见问题、卸载）见 **[windows/README.md](windows/README.md)**。
+> 产物包内也已包含 `windows/` 目录，离线场景同样可用。
+
 ## 升级流程（线上操作参考）
 
 > ⚠️ **memcached 没有持久化，也没有二进制热升级**：`dump.rdb` 那套不存在，数据全在内存里，
@@ -631,6 +659,28 @@ docker run --rm -v "$PWD/dist:/opt/dist" memcached-builder:el7 \
 ```
 
 Native builds are the only way to get a TLS-enabled memcached, because EL7's OpenSSL is too old.
+
+## Windows
+
+memcached has **no native Windows build**, and this project does not produce one — upstream 1.6.45
+ships no Windows build files at all (no `win32/`, no `.sln`/`.vcxproj`, no `CMakeLists.txt`), and the
+core relies on POSIX-only interfaces (`fork`/`setsid` in `daemon.c`, `pthread_create` in `thread.c`,
+`sys/socket.h`/`sys/un.h`/`getpwnam` in `memcached.c`). The only two `_WIN32` guards in the tree are
+`getsockopt` cast remnants from the unofficial 1.4.x port.
+
+Run this project's Linux artifacts instead — no extra build needed:
+
+- **WSL2 (recommended)**: `.\windows\memcached-wsl.ps1` one command installs everything; add
+  `-Tarball <file>` for offline use. Use the x86_64 package on x86_64 Windows and the aarch64
+  package on ARM64 Windows.
+- **Docker Desktop**: mount the extracted package into any glibc-based image (not Alpine/musl).
+
+Artifacts need `glibc >= 2.17`, which every Ubuntu/Debian/CentOS/Rocky WSL distro satisfies; WSL2's
+localhost forwarding makes the daemon reachable from Windows at `127.0.0.1:<port>`. Cygwin is **not**
+supported (upstream doesn't test it, it needs `cygwin1.dll`, and this project has no CI to verify it).
+
+See [windows/README.md](windows/README.md) for details; the `windows/` directory is also bundled
+inside every release tarball.
 
 ## Build parameters
 

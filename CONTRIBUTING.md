@@ -104,6 +104,27 @@ TLS-less or unloadable binary is worse than a clear failure.
 - Detect the package by **content** (`memcached` + `BUILD-INFO.txt`), not by the presence of the
   exec bit — some filesystems lose it, and `install -m 0755` fixes it anyway.
 
+## Windows: do not add a native build path
+
+memcached has **no upstream Windows support** (no Windows build files; `fork`/`setsid`,
+`pthread_create`, `sys/un.h`, `getpwnam` in the core), so **do not add an MSVC / Cygwin / MinGW
+build path** to this repo. It cannot be verified in CI, and shipping an unverifiable binary is
+worse than declaring it unsupported. Windows users are served by running the existing Linux
+artifacts under WSL2 or Docker — see `windows/README.md`.
+
+If you touch the Windows helpers, two traps matter:
+
+- `windows/memcached-wsl.ps1` **must keep its UTF-8 BOM**. Windows PowerShell 5.1 reads BOM-less
+  `.ps1` files using the ANSI code page, which mangles the Chinese text into stray braces and quotes
+  and makes the script fail to parse. After editing, verify with the PowerShell parser:
+  ```powershell
+  powershell -NoProfile -Command "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('windows\memcached-wsl.ps1',[ref]$null,[ref]$e); $e"
+  ```
+  (rewrite with a BOM via `[System.IO.File]::WriteAllText($p,$c,[System.Text.UTF8Encoding]::new($true))`)
+- `windows/` is copied into every package by all three packagers, like `assets/` — keep that in sync.
+  `wsl-install.sh` deliberately re-implements the protocol probe (subshell-isolated `/dev/tcp`, CR
+  stripping); if you change that pattern in `build-memcached.sh`, change it here too.
+
 ## CI notes
 
 - GitHub Actions and CNB pipelines must stay in sync for the **default version** — change both

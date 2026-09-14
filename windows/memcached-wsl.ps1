@@ -54,11 +54,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 让 WSL 的中文输出不出现乱码
-try {
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    $OutputEncoding = [System.Text.Encoding]::UTF8
-} catch { }
+# 注意：不要设置 [Console]::OutputEncoding。
+# wsl.exe 的本地化消息输出编码不固定，强制按 UTF-8 解码反而会把它打成乱码；
+# 本脚本自己的中文输出走控制台 Unicode API，不受该设置影响。
 
 # Windows PowerShell 5.1 默认可能不带 TLS 1.2，下载 GitHub 会失败
 try {
@@ -91,9 +89,10 @@ $wslPrefix = @()
 if ($Distro) { $wslPrefix = @('-d', $Distro) }
 
 # 探测 WSL 能否真正启动（内核缺失时 wsl.exe 会以非 0 退出）
-$probeOut = & wsl.exe @wslPrefix -- bash -lc 'echo WSL-RUNNING' 2>&1
+# 不直接转储 wsl.exe 的输出：它的编码不固定，转出来常是乱码；
+# 让用户自己跑 wsl --status / wsl -l -v 看原始信息即可。
+& wsl.exe @wslPrefix -- bash -lc 'echo WSL-RUNNING' *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host ($probeOut | Out-String)
     Fail @"
 WSL 无法启动发行版$(if ($Distro) { " '$Distro'" } else { '' })。
 最常见原因是 **缺少 WSL2 内核**，请在管理员 PowerShell 中执行：

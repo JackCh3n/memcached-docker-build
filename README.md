@@ -514,7 +514,9 @@ sudo systemctl start memcached
   并直接从构建树收集 `memcached` / `doc/memcached.1` / `scripts/memcached-tool`。
 - **bash 4.2 陷阱**（CentOS 7）：`set -u` 下避免 `${VAR:-$(cmd)}` 写法与空数组展开，脚本已处理。
 - **`memcached-tool` 需要 perl**：该脚本是 perl 写的；目标机没有 perl 时它不可用，
-  但不影响 memcached 本体运行。
+  但不影响 memcached 本体运行。实测补充：Debian/Ubuntu 最小化安装还需
+  `liburi-perl`（脚本 `use URI::Escape`），否则报 `Can't locate URI/Escape.pm`；
+  CentOS 7 系自带该模块，无此问题。
 
 ## 冒烟测试
 
@@ -529,6 +531,56 @@ sudo systemctl start memcached
 因此在内网最小化安装的机器上同样可跑。
 
 CI 中还会额外校验 tar 包完整性并输出产物清单。
+
+## 真机验证记录
+
+> 验证时间：2026-10-30 ~ 2026-10-31；验证方式：按本文档「快速开始 / 一键安装」流程实际操作。
+
+### x86_64（10.24.36.108 · Debian 12 · Docker 28.5.2）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | `./build.sh build 1.6.45 x86_64 auto` 完整构建 | ✅ 镜像 + 二进制 + 打包成功 |
+| 2 | 产物 glibc 上限 | ✅ **GLIBC_2.17**（`objdump -T` 实测） |
+| 3 | 静态 libevent | ✅ `ldd` 仅剩 `libc` / `libpthread`，无任何 libevent 动态依赖 |
+| 4 | 冒烟测试 | ✅ version 握手 + set/get 往返通过 |
+| 5 | `install.sh` 全新安装 + systemd 启动 | ✅ active，`memcached 1.6.45` |
+| 6 | set / get / delete 文本协议 | ✅ STORED / VALUE / DELETED 全部正确 |
+| 7 | UDP 禁用 | ✅ 无 UDP 监听 |
+| 8 | 重启后数据清空 | ✅ 符合纯内存预期 |
+| 9 | 同版本 `--check` | ✅ 判定「已是最新版本，无需更新」 |
+| 10 | **升级矩阵**：1.6.45 → 尝试降 1.6.40 | ✅ **默认拒绝降级** |
+| 11 | `--force` 降级到 1.6.40 | ✅ 成功，版本变为 1.6.40 |
+| 12 | 升级回 1.6.45 | ✅ 成功，服务保持 active |
+| 13 | 升级前自动备份 | ✅ `/var/backups/memcached-<时间戳>/`（旧二进制 + OLD-VERSION.txt） |
+
+### aarch64（10.192.135.51 · 银河麒麟 V10 · Kunpeng-920 · **64KB 页** · cgroup v1）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | 108 上 `buildx --platform linux/arm64` 构建镜像 + 二进制 | ✅ glibc 上限 **GLIBC_2.17**、libevent 静态、QEMU 内冒烟测试通过 |
+| 2 | `install.sh` 安装 + systemd 启动 | ✅ active，`memcached 1.6.45` |
+| 3 | set / get / delete / 多 key | ✅ 全部正确 |
+| 4 | UDP 禁用 | ✅ 无 UDP 监听 |
+| 5 | stats | ✅ `STAT libevent 2.1.12-stable`（静态链接生效） |
+| 6 | **64KB 页运行** | ✅ `getconf PAGESIZE = 65536` 下正常运行（slab 分配器，无 jemalloc 陷阱，与文档结论一致） |
+| 7 | 重启后数据清空 | ✅ 符合预期 |
+| 8 | 同版本 `--check` | ✅ 判定无需更新 |
+| 9 | systemd 开机自启 | ✅ enabled |
+
+### 构建环境备注（QEMU 跨架构）
+
+在 x86_64 主机上用 QEMU 构建 aarch64 镜像时，**容器内访问 GitHub 可能长时间卡住**
+（宿主网络正常，模拟网络慢）。解决办法：先在宿主下载 libevent 源码，起一个本地 HTTP 源，
+再用 `--build-arg LIBEVENT_URL=http://<网桥网关>:<端口>/libevent-2.1.12-stable.tar.gz` 构建。
+Dockerfile 的 `URLS` 循环会把 `LIBEVENT_URL` 放在第一个尝试，命中后即不再访问外网。
+
+## 版本记录
+
+| 版本 | 日期 | 说明 |
+|---|---|---|
+| 1.0 | 2026-09~10 | 初始版本：x86_64 + aarch64 双架构、静态 libevent、自包含离线包、GitHub/CNB 双平台 CI |
+| 1.0.1 | 2026-10-31 | 文档：新增「真机验证记录」——x86_64 与 aarch64（麒麟 V10 / 64KB 页）全流程实测通过；补充 QEMU 跨架构构建的本地源用法 |
 
 ## 贡献指南
 
@@ -749,6 +801,57 @@ Every build automatically runs: `memcached -V`, max `GLIBC_*` symbol version (`o
 `ldd`, and a **real instance start with a `version` handshake plus a `set`/`get` round-trip**.
 Results land in `BUILD-INFO.txt`. The test talks to memcached over bash's built-in `/dev/tcp`,
 so it needs no `nc`/`telnet`.
+
+## Real-machine validation record
+
+> Validated 2026-10-30 ~ 2026-10-31 by following the "Quick start / One-click install" flow.
+
+### x86_64 (10.24.36.108 · Debian 12 · Docker 28.5.2)
+
+| # | Item | Result |
+|---|---|---|
+| 1 | `./build.sh build 1.6.45 x86_64 auto` full build | ✅ image + binary + package |
+| 2 | glibc ceiling of artifact | ✅ **GLIBC_2.17** (objdump -T) |
+| 3 | static libevent | ✅ `ldd` shows only libc/libpthread, no libevent |
+| 4 | smoke test | ✅ version handshake + set/get roundtrip |
+| 5 | `install.sh` + systemd start | ✅ active, memcached 1.6.45 |
+| 6 | set/get/delete text protocol | ✅ STORED / VALUE / DELETED |
+| 7 | UDP disabled | ✅ no UDP listener |
+| 8 | data cleared after restart | ✅ as expected for in-memory cache |
+| 9 | same-version `--check` | ✅ "already up to date" |
+| 10 | upgrade matrix: 1.6.45 → try downgrade to 1.6.40 | ✅ **refused by default** |
+| 11 | `--force` downgrade to 1.6.40 | ✅ succeeded |
+| 12 | upgrade back to 1.6.45 | ✅ succeeded, service stayed active |
+| 13 | pre-upgrade backup | ✅ `/var/backups/memcached-<ts>/` (old binaries + OLD-VERSION.txt) |
+
+### aarch64 (10.192.135.51 · Kylin V10 · Kunpeng-920 · **64KB pages** · cgroup v1)
+
+| # | Item | Result |
+|---|---|---|
+| 1 | buildx `--platform linux/arm64` image + binary (built on 108) | ✅ glibc ceiling GLIBC_2.17, static libevent, QEMU smoke test passed |
+| 2 | `install.sh` + systemd start | ✅ active, memcached 1.6.45 |
+| 3 | set/get/delete/multi-key | ✅ all correct |
+| 4 | UDP disabled | ✅ no UDP listener |
+| 5 | stats | ✅ `STAT libevent 2.1.12-stable` (static link effective) |
+| 6 | **64KB page operation** | ✅ runs normally with `getconf PAGESIZE = 65536` (slab allocator, no jemalloc trap — matches docs) |
+| 7 | data cleared after restart | ✅ as expected |
+| 8 | same-version `--check` | ✅ no update needed |
+| 9 | systemd enable at boot | ✅ enabled |
+
+### Build environment note (QEMU cross-arch)
+
+When building the aarch64 image on an x86_64 host under QEMU, **container access to GitHub can
+hang for a long time** (host network is fine, emulated network is slow). Workaround: download the
+libevent source on the host, serve it from a local HTTP server, then build with
+`--build-arg LIBEVENT_URL=http://<bridge-gateway>:<port>/libevent-2.1.12-stable.tar.gz`.
+The Dockerfile's `URLS` loop tries `LIBEVENT_URL` first, so no external network is needed once hit.
+
+## Version history
+
+| Version | Date | Notes |
+|---|---|---|
+| 1.0 | 2026-09~10 | Initial: x86_64 + aarch64, static libevent, self-contained offline packages, GitHub/CNB CI |
+| 1.0.1 | 2026-10-31 | Docs: real-machine validation record — full flow verified on x86_64 and aarch64 (Kylin V10 / 64KB pages); QEMU local-mirror usage |
 
 ## License
 

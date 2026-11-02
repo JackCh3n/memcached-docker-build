@@ -75,6 +75,24 @@ Therefore the Dockerfile builds libevent from source into `/opt/libevent` with
 - `--libevent system` exists as an escape hatch, but the resulting artifact needs libevent 2.x on
   the target host. Keep the default `auto` → static behaviour.
 
+### Pinned version: 2.1.13-stable
+
+`LIBEVENT_VERSION` in the Dockerfile defaults to `2.1.13-stable` (2026-07-01). 2.1.12-stable is from
+2020; 2.1.13 carries several upstream security fixes (evhttp smuggling, evtag/evrpc OOB read and
+integer overflow, evdns OOB write, `evbuffer_add_reference` dangling pointer).
+
+**Those CVEs are not reachable from our binary** — verified by code search: memcached 1.6.45
+references none of `evhttp`/`evdns`/`evtag`/`evrpc` and never calls `evbuffer_add_reference`.
+The bump is about not shipping a statically-linked library with known CVEs (scanners/SBOM flag it)
+and staying current, not about an exploitable path.
+
+When bumping further, check the configure flags first — **2.1.13 removed `--disable-benchmark`**.
+autoconf only *warns* about unknown options, so a stale flag silently compiles the bench programs
+instead of failing. Verify with `./configure --help | grep -oE '\-\-(disable\|enable)-[a-z0-9-]+'`
+before editing the Dockerfile. Also confirm `libevent.a` and `libevent_pthreads.a` are still
+produced (`grep -E 'lib_LTLIBRARIES|libevent_pthreads_la_SOURCES' Makefile.am`) — both are
+required by `build-memcached.sh`.
+
 ## TLS is native-build-only
 
 memcached's `configure.ac` hard-asserts `OPENSSL_VERSION_NUMBER >= 0x10101000L` (OpenSSL ≥ 1.1.0)
@@ -104,7 +122,7 @@ TLS-less or unloadable binary is worse than a clear failure.
 - Detect the package by **content** (`memcached` + `BUILD-INFO.txt`), not by the presence of the
   exec bit — some filesystems lose it, and `install -m 0755` fixes it anyway.
 
-## Windows: do not add a native build path
+## Windows: cmd `.bat` only — no PowerShell, and mind the encoding
 
 memcached has **no upstream Windows support** (no Windows build files; `fork`/`setsid`,
 `pthread_create`, `sys/un.h`, `getpwnam` in the core), so **do not add an MSVC / Cygwin / MinGW
@@ -112,18 +130,36 @@ build path** to this repo. It cannot be verified in CI, and shipping an unverifi
 worse than declaring it unsupported. Windows users are served by running the existing Linux
 artifacts under WSL2 or Docker — see `windows/README.md`.
 
-If you touch the Windows helpers, two traps matter:
+Three hard rules for the Windows helpers:
 
-- `windows/memcached-wsl.ps1` **must keep its UTF-8 BOM**. Windows PowerShell 5.1 reads BOM-less
-  `.ps1` files using the ANSI code page, which mangles the Chinese text into stray braces and quotes
-  and makes the script fail to parse. After editing, verify with the PowerShell parser:
-  ```powershell
-  powershell -NoProfile -Command "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('windows\memcached-wsl.ps1',[ref]$null,[ref]$e); $e"
-  ```
-  (rewrite with a BOM via `[System.IO.File]::WriteAllText($p,$c,[System.Text.UTF8Encoding]::new($true))`)
-- `windows/` is copied into every package by all three packagers, like `assets/` — keep that in sync.
-  `wsl-install.sh` deliberately re-implements the protocol probe (subshell-isolated `/dev/tcp`, CR
-  stripping); if you change that pattern in `build-memcached.sh`, change it here too.
+1. **No PowerShell.** The Windows entry point is `windows/memcached-wsl.bat` — plain `cmd`
+   builtins plus `wsl.exe`. Do not reintroduce a `.ps1`; keep the download/JSON parsing inside
+   `wsl-install.sh` (runs in WSL, where bash/curl/grep/sed exist) rather than in the `.bat`.
+2. **Save `.bat` as GBK (ANSI).** `cmd` runs with code page 936 and decodes bytes as GBK, so a
+   UTF-8 `.bat` renders as mojibake — the classic "UTF-8 bytes decoded as GBK" problem. Edit
+   `.bat` files with a GBK-capable editor (Notepad / VS Code); `.gitattributes` pins `*.bat` to
+   `eol=crlf` because `cmd` is unreliable with LF-only line endings.
+3. `windows/` is copied into every package by all three packagers, like `assets/` — keep that in
+   sync. `wsl-install.sh` deliberately re-implements the protocol probe (subshell-isolated
+   `/dev/tcp`, CR stripping); if you change that pattern in `build-memcached.sh`, change it here
+   too. When adding a `.bat`, verify it actually runs:
+   `cmd //d //c "<abs-path>\memcached-wsl.bat --help"` (use `//c` or `MSYS_NO_PATHCONV=1` from
+   Git Bash, otherwise MSYS mangles the argument).
+
+## Versioning: `VERSION` is the single source
+
+`VERSION` holds the project version; `install.sh` (`SCRIPT_VERSION`), the CI pipelines and the
+Releases all derive from it. Increment rules: start at `1.0`; `+0.0.1` per commit; `+0.1` for a
+vulnerability fix; `+1` for a big change/rewrite. When you bump it:
+
+- update `VERSION` **and** the version tables in `README.md` (Chinese + English);
+- CI reads `VERSION` on every `main` push: if `v<version>` does not exist yet it tags, publishes
+  the Release and pushes multi-arch images; otherwise it only builds (verification). So bumping
+  the version is what "ships" a release — don't expect a push without a bump to publish anything.
+- GitHub creates the tag (with `GITHUB_TOKEN`, which does not re-trigger workflows, and the tag
+  name `v1.2.3` does not match the `vMemcached-*` trigger either). **CNB deliberately never pushes
+  a git tag** — CNB documents no "CI pushes don't recurse" guarantee, so it only publishes
+  artifacts and images.
 
 ## CI notes
 
@@ -149,6 +185,23 @@ If you touch the Windows helpers, two traps matter:
 - The in-container smoke test (`version` handshake + `set`/`get` round-trip) must pass; a failing
   smoke test fails the build on purpose. It talks to memcached over bash's built-in `/dev/tcp`, so
   no `nc`/`telnet` dependency is needed.
+
+### Docker images (multi-arch)
+
+Both platforms also publish a **runtime** image (not the EL7 builder image):
+
+- `docker/Dockerfile` + `docker/entrypoint.sh`. The base image **must stay glibc-based**
+  (debian/ubuntu/centos) — the artifact is glibc-linked, so `alpine` (musl) cannot run it.
+- GitHub: each matrix job pushes `ghcr.io/<owner>/memcached:<version>-<amd64|arm64>`, then the
+  release job runs `docker buildx imagetools create` to combine them into `:<version>` + `:latest`.
+  Needs `permissions: packages: write` and `docker/login-action` against ghcr.io.
+- CNB: `services: - docker` at the **pipeline** level (like `runner`, it is not allowed on a
+  stage) starts dind and **auto-logs-in to CNB's own registry** `${CNB_DOCKER_REGISTRY}` — no
+  credentials involved. Each pipeline pushes its arch tag; the `docker-manifest` stage synthesises
+  the multi-arch tag only when both arch tags exist (`imagetools create` is idempotent, so both
+  pipelines racing is harmless).
+- Image publishing is gated on `VERSION_CHANGED`, same as the Release. If you add a stage that
+  publishes, give it the same guard so a no-bump push stays verify-only.
 
 ## Architecture notes
 

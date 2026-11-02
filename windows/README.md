@@ -43,7 +43,7 @@
 
 ```powershell
 # 在仓库（或解压后的产物包）的 windows 目录下执行
-.\memcached-wsl.ps1
+.\memcached-wsl.bat
 ```
 
 脚本会：检查 WSL 是否真能启动 → 探测 WSL 内架构 → 下载（或使用本地产物包）→
@@ -53,16 +53,16 @@
 
 ```powershell
 # 离线/内网：用本地已下载的产物包
-.\memcached-wsl.ps1 -Tarball .\memcached-1.6.45-x86_64.tar.gz
+.\memcached-wsl.bat -Tarball .\memcached-1.6.45-x86_64.tar.gz
 
 # 指定 WSL 发行版与验证端口
-.\memcached-wsl.ps1 -Distro Ubuntu-22.04 -Port 16312
+.\memcached-wsl.bat -Distro Ubuntu-22.04 -Port 16312
 
 # 只安装、不自动拉起服务
-.\memcached-wsl.ps1 -NoStart
+.\memcached-wsl.bat -NoStart
 
 # 指定版本（默认取 latest）
-.\memcached-wsl.ps1 -Version 1.6.45
+.\memcached-wsl.bat -Version 1.6.45
 ```
 
 安装过程中会提示输入 **sudo 密码**（安装要写 `/usr/local/bin`、`/etc/systemd/system`）。
@@ -124,25 +124,34 @@ systemctl status memcached
 
 ## 4. Docker Desktop
 
-产物是普通 Linux 二进制，塞进任意 glibc 基础镜像即可：
+**推荐直接用 CI 发布的多架构镜像**（省去自己挂载，参数用环境变量给）：
 
-```powershell
-# 先解压产物包（Windows 10+ 自带 tar）
+```bat
+rem 规则：不用 PowerShell，这里用 cmd
+docker pull ghcr.io/jackch3n/memcached:1.1.0
+docker run -d --name memcached -p 11211:11211 -e CACHESIZE=256 ghcr.io/jackch3n/memcached:1.1.0
+docker ps --filter name=memcached
+```
+
+镜像内可用环境变量（键名与 `/etc/sysconfig/memcached` 一致）：`PORT` / `CACHESIZE` /
+`MAXCONN` / `OPTIONS`；额外参数也可以直接追加在 `docker run ... <镜像> -vv`。
+
+如果想用本地产物包手工起容器（产物是普通 Linux 二进制，塞进任意 glibc 基础镜像即可）：
+
+```bat
+rem Windows 10+ 自带 tar
 tar xzf memcached-1.6.45-x86_64.tar.gz
-
-docker run -d --name memcached -p 11211:11211 `
-  -v ${PWD}/memcached-1.6.45-x86_64:/pkg `
-  ubuntu:20.04 /pkg/memcached -m 64 -c 1024 -l 0.0.0.0 -u root
+docker run -d --name memcached -p 11211:11211 -v %CD%\memcached-1.6.45-x86_64:/pkg ubuntu:20.04 /pkg/memcached -m 64 -c 1024 -l 0.0.0.0 -u root
 ```
 
 验证：
 
-```powershell
+```bat
 docker exec memcached sh -c "printf 'version\r\n' | timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/11211; cat >&3; head -1 <&3'"
-# 期望：VERSION 1.6.45
+rem 期望：VERSION 1.6.45
 ```
 
-> 镜像**不要**用 `alpine`（musl，glibc 产物跑不起来）。
+> 基础镜像**不要**用 `alpine`（musl，glibc 产物跑不起来）；用 debian/ubuntu/centos 等 glibc 系。
 > `-u root` 是因为容器内默认就是 root，而 memcached 以 root 运行必须显式 `-u`。
 
 ## 5. 常见问题
@@ -167,8 +176,21 @@ cd ~/memcached-pkg/memcached-1.6.45-<架构> && sudo ./install.sh --uninstall
 
 | 文件 | 作用 |
 |---|---|
-| `memcached-wsl.ps1` | Windows 侧一键入口：检查 WSL → 取包 → 复制进 WSL → 调用安装脚本 → 验证 |
-| `wsl-install.sh` | WSL 内执行：解压 → `install.sh` → systemd 判定 → 拉起 → 协议验证 |
+| `memcached-wsl.bat` | Windows 侧一键入口：检查 WSL → 取包（`--auto` 下载或 `--tarball` 本地包）→ **先停旧进程** → 复制进 WSL → 调用安装脚本 → 验证 |
+| `kill-memcached.bat` | 停止 WSL 内的 memcached（依次尝试 systemd / pid 文件 / 进程名） |
+| `wsl-install.sh` | WSL 内执行：解压 → `install.sh` → systemd 判定 → 拉起 → 协议验证；支持 `--auto` 从 Release 下载 |
+
+### Windows 侧脚本的两条硬规则
+
+1. **禁止 PowerShell 脚本**：Windows 入口一律用 `.bat`（cmd 内建命令 + `wsl.exe`），
+   不引入 PowerShell 依赖。
+2. **中文不能乱码**：`.bat` 以 **GBK(ANSI)** 编码保存——cmd 默认代码页 936 正好按 GBK
+   解码，中文直接正常显示。若用 UTF-8 保存，就会被按 GBK 解码成乱码
+   （这正是「UTF-8 字节被按 GBK 解码」的典型场景）。因此查看/编辑 `.bat` 请用支持
+   GBK 的编辑器（记事本 / VS Code），不要用会强制转 UTF-8 的工具。
+
+> `wsl-install.sh --auto` 的下载与 JSON 解析都放在 **WSL 内**做（bash/curl/grep/sed 现成），
+> 这样 Windows 侧既不用解析 JSON，也不会碰到编码问题。
 
 ---
 
@@ -182,7 +204,7 @@ guards in the tree are `getsockopt` cast remnants from the unofficial 1.4.x port
 
 Use one of these instead — both run this project's Linux artifacts unmodified:
 
-- **WSL2 (recommended)**: `.\windows\memcached-wsl.ps1` (add `-Tarball <file>` for offline use).
+- **WSL2 (recommended)**: `.\windows\memcached-wsl.bat` (add `-Tarball <file>` for offline use).
   Use the x86_64 package on x86_64 Windows and the aarch64 package on ARM64 Windows.
 - **Docker Desktop**: mount the extracted package into any glibc-based image (not Alpine/musl).
 

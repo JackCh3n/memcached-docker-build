@@ -139,11 +139,21 @@ ENV PATH=${DEVTOOLSET_ROOT}/usr/bin:$PATH \
 #                     链接可执行文件会报 R_X86_64_32S / ADR_PREL_PG_HI21 类重定位错误；
 #   --disable-openssl 不需要 libevent 的 openssl bufferevent（memcached 自己的 TLS
 #                     走 tls.c；且这里也没有可用的 OpenSSL 1.1.0）；
-#   其余 --disable-samples/benchmark/libevent-regress 只为了少编测试代码。
+#   --disable-samples / --disable-libevent-regress 只为少编示例与回归测试代码。
 #
 # libevent 从源码构建，产物为「静态库」，因此分发包里必须附带其 BSD-3-Clause
 # 许可证原文（build-memcached.sh 会把 /opt/libevent/LICENSE 收进产物）。
-ARG LIBEVENT_VERSION=2.1.12-stable
+#
+# 版本选择（2.1.13-stable，2026-07-01）：
+#   2.1.12-stable 是 2020 年的版本，2.1.13 带了多项安全修复（evhttp 头走私、
+#   evtag/evrpc 越界读与整数溢出、evdns 越界写、evbuffer_add_reference 悬空指针）。
+#   已核对：memcached 1.6.45 并不使用 evhttp/evdns/evtag/evrpc，也不调用
+#   evbuffer_add_reference，因此这些 CVE 在本产物里**不可达**；升级的主要收益是
+#   让静态分发的 libevent 不被漏洞扫描/SBOM 误报，并跟上上游维护。
+#   ⚠️ 2.1.13 起 `--disable-benchmark` 已被上游移除（autoconf 对未知选项只警告、
+#     不报错，但会白白多编译 bench 程序），因此这里不再传该参数；
+#     若将来回退到 <= 2.1.12，需要把它加回来。
+ARG LIBEVENT_VERSION=2.1.13-stable
 ARG LIBEVENT_URL=
 ARG LIBEVENT_PREFIX=/opt/libevent
 ARG SKIP_LIBEVENT=no
@@ -178,7 +188,7 @@ RUN set -eux; \
     ./configure \
       --prefix="${LIBEVENT_PREFIX}" \
       --disable-shared --enable-static --with-pic \
-      --disable-openssl --disable-samples --disable-benchmark --disable-libevent-regress; \
+      --disable-openssl --disable-samples --disable-libevent-regress; \
     make -j"$(nproc)"; \
     make install; \
     [ -f "${LIBEVENT_PREFIX}/LICENSE" ] || cp -f LICENSE "${LIBEVENT_PREFIX}/LICENSE" 2>/dev/null || true; \

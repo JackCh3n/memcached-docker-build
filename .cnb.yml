@@ -8,43 +8,43 @@
 #                                                基础镜像 arm64v8/centos:7
 #
 #   同一次 push / tag 会触发「两条并行流水线」，各自编译本架构产物。
-#   注意：runner 只能在流水线级别配置（Stage 级别不支持），所以同一套 stages
-#   通过 YAML 锚点被两条流水线复用——stages 内容是架构无关的。
+#   注意：runner 与 services 只能在流水线级别配置（Stage 级别不支持），所以同一套
+#   stages 通过 YAML 锚点被两条流水线复用——stages 内容是架构无关的。
 #
-# 发布策略
+# 版本与发布策略（与 GitHub Actions 一致）
 # ---------
-#   两条流水线各自把「本架构」的 tar.gz 上传到**同一个** Release。
-#   因此 ensure-release 必须满足：
-#     1) 幂等：已存在则更新标题/描述，不重复创建
-#     2) 并发安全：两条流水线可能同时创建，409/422 视为已存在
-#   上传阶段只 glob 本流水线 workspace 下的 dist/*.tar.gz，天然互不覆盖。
+#   主线（main/master push）读取仓库根 VERSION：
+#     * v<版本> 这个 Release 不存在 -> 版本有变化：发 Release + 推版本化 Docker 镜像
+#     * 已存在                    -> 只执行构建验证（不发布、不推镜像）
+#   注意：CNB 侧**不推送 git tag**（CNB 没有文档化的「CI 推送不递归触发」保证），
+#         tag 由 GitHub Actions 创建；CNB 只按同样逻辑出制品与镜像。
 #
-# 分支与版本语义（与 GitHub Actions 一致）
+# Docker 镜像
 # ---------
-#   - 主线：main / master push        -> 固定 Release `latest`（滚动更新）
-#   - 稳定：git tag vMemcached-x.y.z  -> 同名 tag Release（固化）
+#   用 CNB 自有制品库 docker.cnb.cool（`services: docker` 会自动 docker login，
+#   无需任何凭据）。两条流水线各推本架构标签（:<版本>-amd64 / :<版本>-arm64），
+#   并在对方架构标签就绪时合成多架构 manifest（:<版本> 与 :latest）。
 #
-# 构建产物形态（与 redis-docker-build 的关键差异）
+# 构建产物形态
 # ---------
 #   memcached 的唯一外部依赖 libevent 在镜像内**静态编译并静态链接**
 #   （--disable-shared --with-pic，见 Dockerfile）。原因：EL7 产物原本会链接
 #   libevent-2.0.so.5，而银河麒麟 V10 / openEuler / UOS 普遍是 libevent 2.1.x
 #   （libevent-2.1.so.6）甚至未安装，动态链接搬运过去会直接起不来。
-#   静态链接后产物动态依赖只剩 glibc，且必须随包附带 libevent 的 BSD-3-Clause
-#   许可证原文（build-memcached.sh 会自动生成 LICENSE.libevent.txt）。
-#
-# TLS 说明：memcached TLS 要求 OpenSSL >= 1.1.0，EL7 只有 1.0.2k，
-#   因此 CI 不产出 TLS 版本；需要 TLS 请用 build-native.sh 在目标机原生编译。
 # =============================================================================
 
-# ── 构建环境锚点（按架构各一份；runner 只能写在流水线级别） ────────────────
+# ── 构建环境锚点（按架构各一份；runner/services 只能写在流水线级别） ─────────
 # 注意：buildArgs 必须是 docker.build 的子节点（写成 docker 的子节点会被静默忽略，
 #       导致异架构仍拉取 Dockerfile 里的默认镜像而报
 #       "no match for platform in manifest"）。
+# services: docker -> 开启 dind，自动注入 docker daemon/cli 并自动登录
+#                   CNB 自有 registry（${CNB_DOCKER_REGISTRY}），无需凭据。
 .build-env-amd64: &build-env-amd64
   runner:
     tags: cnb:arch:amd64
     cpus: 8
+  services:
+    - docker
   docker:
     build:
       dockerfile: Dockerfile   # CentOS 7.6.1810 + devtoolset-10 + 静态 libevent
@@ -58,6 +58,8 @@
   runner:
     tags: cnb:arch:arm64:v8
     cpus: 8
+  services:
+    - docker
   docker:
     build:
       dockerfile: Dockerfile
@@ -110,6 +112,40 @@
       VERSION: RELEASE_VERSION
       MK: RELEASE_MAKE_LATEST
 
+  # 读取项目版本号，并判断该版本是否已经发布过（决定是否发布/推镜像）
+  # 判定方式：CNB 自己的 Releases 里是否已存在 v<版本>（与 GitHub 侧「tag 是否存在」
+  # 等价，且不依赖外部 API）。
+  - name: resolve-project-version
+    script: |
+      set -e
+      V="$(tr -d '[:space:]' < VERSION)"
+      [ -n "$V" ] || { echo "!!! VERSION 文件为空或缺失"; exit 1; }
+      echo ">>> 项目版本: ${V}"
+      CHANGED="no"
+      REF="${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"
+      case "$REF" in
+        vMemcached-*)
+          # 稳定版 tag 构建：直接按该 tag 发布，不参与版本变化判定
+          echo ">>> 稳定版构建，跳过版本变化判定"
+          ;;
+        *)
+          API="https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases"
+          if curl -s -m 30 -H "Authorization: Bearer ${CNB_TOKEN}" \
+               -H "Accept: application/vnd.cnb.api+json" "${API}" \
+               | tr -d ' \t\n' | grep -q "\"tag_name\":\"v${V}\""; then
+            echo ">>> v${V} 已发布过 -> 版本未变化，本次只做构建验证"
+          else
+            echo ">>> v${V} 未发布过 -> 版本有变化，将发 Release 并推镜像"
+            CHANGED="yes"
+          fi
+          ;;
+      esac
+      echo "##[set-output VERSION=${V}]"
+      echo "##[set-output CHANGED=${CHANGED}]"
+    exports:
+      VERSION: PROJECT_VERSION
+      CHANGED: VERSION_CHANGED
+
   # 编译（架构由流水线的 BASE_IMAGE 决定）
   - name: build-memcached
     script: |
@@ -161,14 +197,18 @@
   - name: gen-notes
     script: |
       set -e
-      printf '## %s\n\nmemcached %s, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.\n\n| Arch | Asset | Runs on |\n|------|-------|---------|\n| x86_64 | `memcached-%s-x86_64.tar.gz` | CentOS 7.6 / 7.9 and later |\n| aarch64 | `memcached-%s-aarch64.tar.gz` | aarch64 with glibc >= 2.17 (incl. Kylin V10 SP3) |\n\n- **libevent is statically linked** - the artifact has no runtime libevent dependency.\n  This matters: an EL7 build would otherwise link `libevent-2.0.so.5`, while Kylin V10 /\n  openEuler / UOS ship `libevent-2.1.so.6` or none at all, so the binary would fail to start.\n- Toolchain: CentOS 7 vault archive + devtoolset-10 (GCC 10.2); libevent built from source with `--disable-shared --with-pic`.\n- TLS: not enabled (memcached TLS requires OpenSSL >= 1.1.0, EL7 only has 1.0.2k).\n  Build natively on the target host with `build-native.sh <version> system yes` if you need TLS.\n\nEach tarball is self-contained: extract it and run `sudo ./install.sh` (offline install / in-place update).\nIt ships `install.sh`, `memcached.service`, `memcached.sysconfig`, `memcached-tool`, `man/memcached.1`,\n`BUILD-INFO.txt`, `LICENSE` (this project, MIT), `LICENSE.memcached.txt` and `LICENSE.libevent.txt`.\n\n> memcached is **BSD-3-Clause**; libevent is **BSD-3-Clause**.\n' \
+      printf '## %s\n\nmemcached %s, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.\n\n| Arch | Asset | Runs on |\n|------|-------|---------|\n| x86_64 | `memcached-%s-x86_64.tar.gz` | CentOS 7.6 / 7.9 and later |\n| aarch64 | `memcached-%s-aarch64.tar.gz` | aarch64 with glibc >= 2.17 (incl. Kylin V10 SP3) |\n\n- **libevent is statically linked** - the artifact has no runtime libevent dependency.\n  This matters: an EL7 build would otherwise link `libevent-2.0.so.5`, while Kylin V10 /\n  openEuler / UOS ship `libevent-2.1.so.6` or none at all, so the binary would fail to start.\n- Toolchain: CentOS 7 vault archive + devtoolset-10 (GCC 10.2); libevent built from source with `--disable-shared --with-pic`.\n- TLS: not enabled (memcached TLS requires OpenSSL >= 1.1.0, EL7 only has 1.0.2k).\n  Build natively on the target host with `build-native.sh <version> system yes` if you need TLS.\n\nEach tarball is self-contained: extract it and run `sudo ./install.sh` (offline install / in-place update).\nIt ships `install.sh`, `memcached.service`, `memcached.sysconfig`, `memcached-tool`, `man/memcached.1`,\n`windows/` (WSL2 helpers), `BUILD-INFO.txt`, `LICENSE` (this project, MIT),\n`LICENSE.memcached.txt` and `LICENSE.libevent.txt`.\n\n> memcached is **BSD-3-Clause**; libevent is **BSD-3-Clause**.\n' \
         "${RELEASE_TITLE}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" > RELEASE_NOTES.md
       cat RELEASE_NOTES.md
 
-  # 幂等 + 并发安全地确保 Release 存在
+  # 幂等 + 并发安全地确保 Release 存在（版本未变化时直接跳过）
   - name: ensure-release
     script: |
       set -e
+      if [ "${VERSION_CHANGED:-no}" != "yes" ]; then
+        echo ">>> 版本未变化，跳过 Release 发布（本次仅构建验证）"
+        exit 0
+      fi
       TAG="${RELEASE_TAG:?缺少 RELEASE_TAG}"
       NAME="${RELEASE_TITLE:-$TAG}"
       MK="${RELEASE_MAKE_LATEST:-false}"
@@ -239,6 +279,56 @@
       tag: ${RELEASE_TAG}
       attachments:
         - "./dist/*.tar.gz"
+
+  # 构建并推送本架构的运行时镜像到 CNB 自有制品库（版本未变化时跳过）
+  # 镜像名：${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:<版本>-<amd64|arm64>
+  - name: docker-build-push
+    script: |
+      set -e
+      if [ "${VERSION_CHANGED:-no}" != "yes" ]; then
+        echo ">>> 版本未变化，跳过镜像构建与推送"
+        exit 0
+      fi
+      IMG="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+      V="${PROJECT_VERSION:?缺少 PROJECT_VERSION}"
+      DARCH="$(uname -m)"
+      case "$DARCH" in
+        x86_64|amd64)  DARCH=amd64 ;;
+        aarch64|arm64) DARCH=arm64 ;;
+        *) echo "!!! 不支持的架构: $DARCH"; exit 1 ;;
+      esac
+      echo ">>> 构建并推送 ${IMG}:${V}-${DARCH}"
+      # services: docker 已自动完成 docker login，无需凭据
+      docker buildx build \
+        --platform "linux/${DARCH}" \
+        -f docker/Dockerfile \
+        --build-arg "PKG_DIR=dist/memcached-${RELEASE_VERSION}-$(uname -m)" \
+        -t "${IMG}:${V}-${DARCH}" \
+        --push .
+
+  # 两条流水线各推本架构标签；若对方架构标签也已就绪，则合成多架构 manifest。
+  # imagetools create 是幂等的，两条流水线同时执行也不会出问题（内容相同）。
+  - name: docker-manifest
+    script: |
+      set -e
+      if [ "${VERSION_CHANGED:-no}" != "yes" ]; then
+        echo ">>> 版本未变化，跳过多架构 manifest 合成"
+        exit 0
+      fi
+      IMG="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+      V="${PROJECT_VERSION:?缺少 PROJECT_VERSION}"
+      for a in amd64 arm64; do
+        if ! docker manifest inspect "${IMG}:${V}-${a}" >/dev/null 2>&1; then
+          echo ">>> ${IMG}:${V}-${a} 尚未就绪（另一条流水线可能还没跑完），跳过本次合成"
+          exit 0
+        fi
+      done
+      echo ">>> 合成多架构镜像 ${IMG}:${V} 与 ${IMG}:latest"
+      docker buildx imagetools create \
+        -t "${IMG}:${V}" \
+        -t "${IMG}:latest" \
+        "${IMG}:${V}-amd64" \
+        "${IMG}:${V}-arm64"
 
 # ── 主线：main / master 分支 push（两条流水线并行） ─────────────────────────
 main:

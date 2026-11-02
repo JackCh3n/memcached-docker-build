@@ -56,7 +56,7 @@
 
 set -e
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # memcached-tool 是上游自带的 perl 运维脚本，属可选组件

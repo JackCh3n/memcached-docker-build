@@ -2,31 +2,28 @@
 # memcached-docker-build · GitHub Actions 构建流水线（多架构）
 #
 # 分支与版本语义（本文件位于 main 分支）：
-#   - 主线版本：push 到 main / master 自动构建默认版本（x86_64 + aarch64），
-#     发布到固定 Release 标签 `latest`（每次覆盖更新）
-#   - 稳定版本：打 git tag（vMemcached-1.6.45）触发，从 tag 名解析版本，
+#   - 主线版本：push 到 main / master，读取仓库根 VERSION 文件得到项目版本号
+#       * 版本号变化 -> 自动打 tag v<版本>、发布 Release、推送版本化 Docker 镜像
+#       * 版本号未变 -> 只执行构建验证（不发布、不推镜像）
+#   - 稳定版本：打 git tag（vMemcached-1.6.45）触发，从 tag 名解析 memcached 版本，
 #     发布到同名 tag（固化）
 #   - 手动触发：workflow_dispatch 可指定任意版本 / libevent 模式 / 架构
 #
 # 架构说明：
 #   x86_64  -> ubuntu-latest 原生构建，基础镜像 centos:7.6.1810（glibc 2.17）
 #   aarch64 -> ubuntu-24.04-arm 原生 ARM runner，基础镜像 arm64v8/centos:7（glibc 2.17）
-#              产物可在 glibc >= 2.17 的 aarch64 系统运行，含银河麒麟 V10 SP3
 #
-#   注意：`ubuntu-24.04-arm` 目前仅对 public 仓库免费；若仓库为 private，
+# 产物形态：
+#   1) tar.gz 制品（Release 附件 + Workflow Artifact）：memcached + memcached-tool +
+#      man 手册 + install.sh + memcached.service + memcached.sysconfig + windows/ + 许可证
+#   2) 多架构 Docker 运行时镜像：ghcr.io/<owner>/memcached:<版本>（含 :latest 别名）
+#
+# 注意：`ubuntu-24.04-arm` 目前仅对 public 仓库免费；若仓库为 private，
 #   请把 aarch64 的 runner 改回 `ubuntu-latest` 并把 qemu 置为 "true"。
 #
-# 产物形态（与 redis-docker-build 的关键差异）：
-#   * memcached 的唯一外部依赖 libevent 在镜像内**静态编译**并静态链接，
-#     因此产物不依赖任何 libevent 动态库——EL7 的 libevent-2.0.so.5 在麒麟 V10
-#     （libevent 2.1.x）上并不存在，动态链接会导致搬过去起不来。
-#   * 产物 tar.gz 内除 memcached / memcached-tool / man 手册外，还包含
-#     install.sh / memcached.service / memcached.sysconfig，即「自包含、可离线一键安装」。
-#
-# TLS 说明（重要）：
-#   memcached 的 --enable-tls 要求 OpenSSL >= 1.1.0，而 EL7 只有 1.0.2k，
-#   因此**本流水线不产出 TLS 版本**。需要 TLS 请在目标机原生编译：
-#       ./build-native.sh 1.6.45 system yes      # 麒麟 V10 SP3 / UOS / EL8+ 自带 OpenSSL 1.1.1
+# TLS 说明：memcached 的 --enable-tls 要求 OpenSSL >= 1.1.0，而 EL7 只有 1.0.2k，
+#   因此本流水线不产出 TLS 版本。需要 TLS 请在目标机原生编译：
+#       ./build-native.sh <版本> system yes
 # =============================================================================
 name: build-memcached
 
@@ -38,7 +35,7 @@ on:
         required: false
         default: "1.6.45"
       libevent:
-        description: "libevent 链接方式 auto|static|system（默认 static，产物无 libevent 依赖）"
+        description: "libevent 链接方式 auto|static|system（默认 auto，镜像内为静态）"
         required: false
         default: "auto"
       sasl:
@@ -67,6 +64,10 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/memcached
 
 jobs:
   # ── 解析构建场景与版本（供矩阵复用） ──────────────────────────────
@@ -80,7 +81,11 @@ jobs:
       sasl: ${{ steps.resolve.outputs.sasl }}
       seccomp: ${{ steps.resolve.outputs.seccomp }}
       smoke: ${{ steps.resolve.outputs.smoke }}
+      project_version: ${{ steps.ver.outputs.version }}
+      version_changed: ${{ steps.ver.outputs.version_changed }}
     steps:
+      - uses: actions/checkout@v4
+
       - id: resolve
         name: 解析场景与版本
         run: |
@@ -125,6 +130,32 @@ jobs:
             echo ">>> 场景: 主线构建，版本=$DEFAULT_VERSION"
           fi
 
+      - id: ver
+        name: 读取 VERSION 并判断版本是否变化
+        run: |
+          set -e
+          # VERSION 是项目版本号的唯一来源（规则：默认 1.0；每次提交 +0.0.1；
+          # 漏洞修复 +0.1；大改动/重写 +1）
+          V="$(tr -d '[:space:]' < VERSION)"
+          [ -n "$V" ] || { echo "::error::VERSION 文件为空或缺失"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo ">>> 项目版本: $V"
+
+          # tag 推送 / 手动触发不参与「版本变化」判定，直接按既有语义发布
+          if [ "${{ github.ref_type }}" = "tag" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 主线：该版本是否已经打过 tag / 发过 Release？
+          if git ls-remote --tags --exit-code origin "v$V" >/dev/null 2>&1; then
+            echo ">>> v$V 已存在 -> 版本未变化，本次只做构建验证"
+            echo "version_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo ">>> v$V 不存在 -> 版本有变化，将打 tag / 发 Release / 推镜像"
+            echo "version_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # TLS 前置拦截：给出可操作的说明，而不是让 Docker 构建跑到一半才失败
       - name: TLS 前置检查
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.tls == 'yes'
@@ -146,12 +177,14 @@ jobs:
             runner: ubuntu-latest
             base_image: centos:7.6.1810
             platform: linux/amd64
+            docker_arch: amd64
             qemu: "false"
           # private 仓库请改为 runner: ubuntu-latest / qemu: "true"
           - arch: aarch64
             runner: ubuntu-24.04-arm
             base_image: arm64v8/centos:7
             platform: linux/arm64
+            docker_arch: arm64
             qemu: "false"
     runs-on: ${{ matrix.runner }}
     steps:
@@ -256,12 +289,36 @@ jobs:
           path: dist/*.tar.gz
           retention-days: 30
 
-  # ── 汇总发布 Release ──────────────────────────────────────────────
+      # 版本化 Docker 镜像：仅「主线且版本有变化」时推送
+      - name: 构建并推送架构镜像 ${{ needs.prepare.outputs.project_version }}
+        if: >-
+          steps.filter.outputs.skip == 'false' &&
+          needs.prepare.outputs.scene == 'mainline' &&
+          needs.prepare.outputs.version_changed == 'true'
+        run: |
+          set -e
+          V="${{ needs.prepare.outputs.project_version }}"
+          echo ">>> 推送 ${IMAGE}:${V}-${{ matrix.docker_arch }}"
+          docker login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            -f docker/Dockerfile \
+            --build-arg "PKG_DIR=dist/memcached-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}" \
+            -t "${IMAGE}:${V}-${{ matrix.docker_arch }}" \
+            --push .
+
+  # ── 汇总发布 Release / 镜像 ──────────────────────────────────────────
+  # 主线且版本未变化时整个 job 跳过（只验证，不发布）
   release:
     needs: [prepare, build]
+    if: >-
+      needs.prepare.outputs.scene != 'mainline' ||
+      needs.prepare.outputs.version_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 下载全部架构产物
         uses: actions/download-artifact@v4
@@ -269,18 +326,45 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # 主线且版本变化：打项目版本 tag（v<版本>）。
+      # 用 GITHUB_TOKEN 推送不会再次触发工作流（GitHub 官方行为）；
+      # 且 tag 名是 v1.2.3 形式，也不匹配本工作流的 vMemcached-* 触发模式。
+      - name: 打项目版本 tag
+        if: needs.prepare.outputs.scene == 'mainline'
+        run: |
+          set -e
+          V="${{ needs.prepare.outputs.project_version }}"
+          if git ls-remote --tags --exit-code origin "v$V" >/dev/null 2>&1; then
+            echo ">>> tag v$V 已存在，跳过创建"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "release v$V" "${{ github.sha }}"
+          git push origin "refs/tags/v$V"
+          echo ">>> 已创建并推送 tag v$V"
+
       - name: 发布 Release
         env:
           GH_TOKEN: ${{ github.token }}
           SCENE: ${{ needs.prepare.outputs.scene }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          PROJECT_VERSION: ${{ needs.prepare.outputs.project_version }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
           LIBEVENT_MODE: ${{ needs.prepare.outputs.libevent }}
           SASL_FLAG: ${{ needs.prepare.outputs.sasl }}
           SECCOMP_FLAG: ${{ needs.prepare.outputs.seccomp }}
+          IMAGE: ${{ env.IMAGE }}
         run: |
           set -e
           ls -lh artifacts
+
+          # 主线：发布到项目版本 tag，同时刷新 latest 滚动别名
+          if [ "$SCENE" = "mainline" ]; then
+            REL_TAG="v$PROJECT_VERSION"
+          else
+            REL_TAG="$RELEASE_TAG"
+          fi
 
           X64="memcached-${VERSION}-x86_64.tar.gz"
           ARM="memcached-${VERSION}-aarch64.tar.gz"
@@ -299,7 +383,7 @@ jobs:
           fi
 
           case "$SCENE" in
-            mainline) TITLE="Mainline memcached (latest)" ;;
+            mainline) TITLE="memcached-docker-build ${PROJECT_VERSION} (memcached ${VERSION})" ;;
             tag)      TITLE="Stable memcached ${VERSION}" ;;
             *)        TITLE="memcached ${VERSION}" ;;
           esac
@@ -316,11 +400,22 @@ jobs:
 
           - **libevent: statically linked** — 产物不依赖任何 libevent 动态库。
             这一点很关键：EL7 的产物原本会链接 \`libevent-2.0.so.5\`，而麒麟 V10 / openEuler /
-            UOS 普遍是 \`libevent-2.1.so.6\` 甚至未安装 libevent，动态链接会直接起不来。
+            UOS 普遍是 \`libevent-2.1.so.6\` 甚至未安装，动态链接会直接起不来。
           - libevent mode: \`${LIBEVENT_MODE}\`（镜像内以 \`--disable-shared --with-pic\` 源码构建）
           - SASL: \`${SASL_FLAG}\`，seccomp: \`${SECCOMP_FLAG}\`，TLS: 未启用
             （memcached TLS 要求 OpenSSL >= 1.1.0，EL7 只有 1.0.2k；需要 TLS 请用 \`build-native.sh\` 在目标机原生编译）
           - Toolchain: CentOS 7 vault 归档源 + devtoolset-10（GCC 10.2）
+
+          ### Docker 镜像（多架构）
+
+          \`\`\`bash
+          docker pull ${IMAGE}:${PROJECT_VERSION}          # 或 :latest
+          docker run -d --name memcached -p 11211:11211 -e CACHESIZE=256 ${IMAGE}:${PROJECT_VERSION}
+          \`\`\`
+
+          镜像内参数通过环境变量调整（键名与 \`/etc/sysconfig/memcached\` 一致）：
+          \`PORT\` / \`CACHESIZE\` / \`MAXCONN\` / \`OPTIONS\`。
+          ⚠️ 基础镜像是 glibc 系（debian），**不要**换成 alpine（musl，产物起不来）。
 
           ### 离线一键安装
 
@@ -334,8 +429,10 @@ jobs:
           ./install.sh --check       # 只看会做什么，不做改动
           \`\`\`
 
-          包内含：\`memcached\`、\`memcached-tool\`（perl 运维脚本）、\`man/memcached.1\`、
-          \`install.sh\`、\`memcached.service\`、\`memcached.sysconfig\`、\`BUILD-INFO.txt\`，
+          Windows 用户：包内 \`windows/\` 目录提供 WSL2 一键安装脚本（\`memcached-wsl.bat\`，纯 cmd 实现）。
+
+          包内含：\`memcached\`、\`memcached-tool\`、\`man/memcached.1\`、\`install.sh\`、
+          \`memcached.service\`、\`memcached.sysconfig\`、\`windows/\`、\`BUILD-INFO.txt\`，
           以及 \`LICENSE\`（本项目 MIT）、\`LICENSE.memcached.txt\`、
           \`LICENSE.libevent.txt\`（静态链接 libevent 时必须随包分发其许可证原文）。
 
@@ -359,15 +456,33 @@ jobs:
             fi
           }
 
-          if [ "$SCENE" = "mainline" ]; then
+          publish "$REL_TAG"
+          # 主线场景同时刷新 latest 滚动别名（指向同一批产物）
+          if [ "$SCENE" = "mainline" ] && [ "$REL_TAG" != "latest" ]; then
             publish "latest"
-          else
-            publish "$RELEASE_TAG"
           fi
+
+      # 把两个架构镜像合成一个多架构 manifest（amd64 + arm64）
+      - name: 合并多架构镜像
+        if: needs.prepare.outputs.scene == 'mainline'
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          PROJECT_VERSION: ${{ needs.prepare.outputs.project_version }}
+        run: |
+          set -e
+          docker login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          echo ">>> 合成 ${IMAGE}:${PROJECT_VERSION} 与 ${IMAGE}:latest"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${PROJECT_VERSION}" \
+            -t "${IMAGE}:latest" \
+            "${IMAGE}:${PROJECT_VERSION}-amd64" \
+            "${IMAGE}:${PROJECT_VERSION}-arm64"
 
       - name: 汇总
         run: |
           echo "场景        : $SCENE"
           echo "memcached   : $VERSION"
-          echo "Release     : $RELEASE_TAG"
+          echo "项目版本    : $PROJECT_VERSION"
+          echo "Release     : $([ "$SCENE" = mainline ] && echo "v$PROJECT_VERSION + latest" || echo "$RELEASE_TAG")"
+          echo "镜像        : $IMAGE:$PROJECT_VERSION , $IMAGE:latest"
           ls -lh *.tar.gz 2>/dev/null || true

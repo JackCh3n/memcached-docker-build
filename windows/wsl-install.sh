@@ -14,15 +14,22 @@
 # 用法（在 WSL 内执行）：
 #   bash wsl-install.sh --tarball ~/memcached-pkg/memcached-1.6.45-x86_64.tar.gz
 #   bash wsl-install.sh --dir ~/memcached-pkg/memcached-1.6.45-x86_64
-#   bash wsl-install.sh --tarball <包> --no-start     # 只安装，不起服务
-#   bash wsl-install.sh --tarball <包> --port 16312   # 换探测端口
+#   bash wsl-install.sh --auto                    # 联网从 Release 下载本架构产物包
+#   bash wsl-install.sh --tarball <包> --no-start  # 只安装，不起服务
+#   bash wsl-install.sh --tarball <包> --port 16312 # 换探测端口
 #
 # 参数
 #   --tarball <file>   产物压缩包（memcached-<版本>-<架构>.tar.gz）
 #   --dir     <dir>    已解压的产物目录
+#   --auto             本地没有包时，从 GitHub Release 下载本架构产物包（需 curl）
 #   --port    <n>      探测端口，默认 16311
 #   --no-start         安装后不启动服务（默认在 systemd 不可用时后台拉起一次）
 #   -h, --help         显示帮助
+#
+# 环境变量
+#   RELEASE_REPO       产物包来源仓库，默认 JackCh3n/memcached-docker-build
+#                      （fork 或内网镜像时可覆盖）
+#   WORKDIR            解压/下载目录，默认 ~/memcached-pkg
 #
 # 兼容：bash 4.2（不使用 bash 4.3+ 特性）
 # =============================================================================
@@ -32,7 +39,10 @@ TARBALL=""
 PKGDIR_ARG=""
 PROBE_PORT="${PROBE_PORT:-16311}"
 START_SERVICE="yes"
+AUTO_DOWNLOAD="no"
 WORKDIR="${WORKDIR:-$HOME/memcached-pkg}"
+# 产物包来源仓库（fork 或内网镜像时可覆盖）
+REPO="${RELEASE_REPO:-JackCh3n/memcached-docker-build}"
 
 usage() {
   awk 'NR>1 { if (/^#/) { sub(/^# ?/,""); print; next }
@@ -47,6 +57,7 @@ while [ $# -gt 0 ]; do
     --dir)     PKGDIR_ARG="$2"; shift 2 ;;
     --port)    PROBE_PORT="$2"; shift 2 ;;
     --no-start) START_SERVICE="no"; shift ;;
+    --auto)    AUTO_DOWNLOAD="yes"; shift ;;
     -h|--help) usage ;;
     *) echo "[错误] 未知参数: $1（用 --help 查看用法）" >&2; exit 1 ;;
   esac
@@ -57,6 +68,36 @@ c_warn() { printf '\033[33m[警告]\033[0m %s\n' "$*"; }
 c_err()  { printf '\033[31m[错误]\033[0m %s\n' "$*" >&2; }
 c_step() { printf '\n\033[36m===> %s\033[0m\n' "$*"; }
 die()    { c_err "$*"; exit 1; }
+
+# 从 GitHub Release 下载本架构产物包。
+# 放在 WSL 内做：bash/curl/grep/sed 都现成，不必在 Windows 侧解析 JSON，
+# 也避开 .bat 的中文编码问题。结果写入全局 DL_PATH（不回显到 stdout）。
+DL_PATH=""
+download_release() {
+  command -v curl >/dev/null 2>&1 \
+    || die "--auto 需要 curl（sudo apt-get install -y curl）；离线请改用 --tarball 指定本地包"
+  _api="https://api.github.com/repos/${REPO}/releases/latest"
+  c_info "获取发布信息: ${_api}"
+  _json="$(curl -s -m 60 "$_api" || true)"
+  [ -n "$_json" ] || die "获取发布信息失败（网络不可达？）。请改用 --tarball 指定本地包"
+  # GitHub 的 JSON 默认是美化格式（多行、缩进），也可能是单行；按 { 和 , 拆开后，
+  # 「含 browser_download_url 且 URL 里带本架构文件名」的那一行就是目标资产。
+  # 注意 sed 必须容忍冒号后的空格（GitHub 美化输出是 "key": "value"）。
+  _url="$(printf '%s' "$_json" | tr '{,' '\n\n' \
+          | grep 'browser_download_url' | grep -- "-${ARCH}.tar.gz" | head -n 1 \
+          | sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\)".*/\1/p')"
+  [ -n "$_url" ] || die "Release 中未找到 ${ARCH} 架构的产物包（repo=${REPO}）"
+  _out="${WORKDIR}/$(basename "$_url")"
+  mkdir -p "$WORKDIR"
+  c_info "下载: ${_url}"
+  curl -sL -m 600 -o "$_out" "$_url" || die "下载失败: ${_url}"
+  # gzip 魔数校验，防止把错误页/网关拦截页当成产物包
+  if [ "$(head -c 2 "$_out" | od -An -tx1 | tr -d ' \n')" != "1f8b" ]; then
+    rm -f "$_out"
+    die "下载内容不是合法 gzip 包（可能被网关拦截），请改用 --tarball 指定本地包"
+  fi
+  DL_PATH="$_out"
+}
 
 # ── 环境识别 ────────────────────────────────────────────────────────────────
 is_wsl() {
@@ -110,7 +151,13 @@ else
       [ -f "$cand" ] && { TARBALL="$cand"; break; }
     done
   fi
-  [ -n "$TARBALL" ] && [ -f "$TARBALL" ] || die "未找到产物包。请用 --tarball <file> 指定，或先放到 ${WORKDIR}/"
+  # 本地没有包且允许联网时，从 Release 直接下载
+  if [ -z "$TARBALL" ] && [ "$AUTO_DOWNLOAD" = "yes" ]; then
+    c_info "本地未找到产物包，改为从 Release 下载"
+    download_release
+    TARBALL="$DL_PATH"
+  fi
+  [ -n "$TARBALL" ] && [ -f "$TARBALL" ] || die "未找到产物包。请用 --tarball <file> 指定、加 --auto 联网下载，或先放到 ${WORKDIR}/"
   c_info "产物包: ${TARBALL}"
 
   # 架构自检：包里带的 BUILD-INFO.txt 记录了目标架构，避免 x86_64 包装到 ARM 机器

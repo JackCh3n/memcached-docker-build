@@ -128,6 +128,15 @@ memcached 为 **BSD-3-Clause**（OSI 认可的开源许可），源码包内许�
 ├── build.sh                       # 宿主机一键构建入口（本地有 Docker 时）
 ├── build-native.sh                # 目标机原生编译（麒麟/信创，无需 Docker；TLS 走这里）
 ├── install.sh                     # 一键安装/更新脚本（纯离线，随产物包分发）
+├── VERSION                        # 项目版本号（唯一来源；CI 读它判断版本是否变化）
+├── docker/                        # 运行时镜像（多架构，docker run 直接用）
+│   ├── Dockerfile                 #   glibc 系基础镜像 + 产物 + entrypoint
+│   └── entrypoint.sh              #   读 /etc/sysconfig/memcached 与环境变量后启动
+├── windows/                       # Windows 场景（WSL2 安装；纯 .bat，禁 PowerShell）
+│   ├── memcached-wsl.bat          #   Windows 侧一键安装入口
+│   ├── kill-memcached.bat         #   停止 WSL 内的 memcached
+│   ├── wsl-install.sh             #   WSL 内执行：解压→install.sh→systemd 判定→拉起→验证
+│   └── README.md                  #   原理、WSL2/Docker 做法、排查、FAQ
 ├── .github/workflows/build.yml    # GitHub Actions 流水线（x86_64 + aarch64）
 ├── .cnb.yml                       # CNB (cnb.cool) 流水线（x86_64 + aarch64 双架构）
 ├── assets/
@@ -138,7 +147,7 @@ memcached 为 **BSD-3-Clause**（OSI 认可的开源许可），源码包内许�
 
 > 产物包（`memcached-<版本>-<架构>.tar.gz`）是**自包含**的：除二进制外还包含
 > `memcached-tool`（运维脚本）/ `man/memcached.1` / `install.sh` / `memcached.service` /
-> `memcached.sysconfig` / `BUILD-INFO.txt` / 上述四份许可证，解压后即可离线一键安装。
+> `memcached.sysconfig` / `windows/` / `BUILD-INFO.txt` / 上述四份许可证，解压后即可离线一键安装。
 
 ## 快速开始
 
@@ -231,7 +240,7 @@ docker run --rm --platform linux/arm64 -v "$PWD/dist:/opt/dist" memcached-builde
 
 Docker 镜像层可覆盖参数：`OS_MIRROR`（归档镜像）、`VAULT_PREFIX`、`DEVTOOLSET`、
 `DEVTOOLSET_MIRROR`（devtoolset 主源，默认 CDN）、`DEVTOOLSET_MIRROR_FALLBACK`（备用源）、
-`INSTALL_OPT_DEPS`（安装 sasl/seccomp/openssl 开发包）、`LIBEVENT_VERSION`（默认 `2.1.12-stable`）、
+`INSTALL_OPT_DEPS`（安装 sasl/seccomp/openssl 开发包）、`LIBEVENT_VERSION`（默认 `2.1.13-stable`）、
 `LIBEVENT_URL`（libevent 源码地址，内网镜像用）、`SKIP_LIBEVENT=yes`（改用发行版 libevent）。
 
 > ⚠️ **`--static yes` 请谨慎使用**：该选项会让 memcached 连带静态链接 **glibc**，
@@ -415,7 +424,7 @@ sudo ./install.sh
 
 | 方式 | 可用性 | 做法 |
 |---|---|---|
-| **WSL2（推荐）** | ✅ | `.\windows\memcached-wsl.ps1` 一条命令装完；x86_64 Windows 取 x86_64 包，ARM64 Windows 取 aarch64 包 |
+| **WSL2（推荐）** | ✅ | `.\windows\memcached-wsl.bat` 一条命令装完；x86_64 Windows 取 x86_64 包，ARM64 Windows 取 aarch64 包 |
 | **Docker Desktop** | ✅ | 把解压后的产物目录挂进任意 glibc 基础镜像（**不要**用 alpine/musl） |
 | Cygwin | ⚠️ 不支持 | 理论可编译，但上游不测试、需 `cygwin1.dll`，本项目无 CI 可验证，故**不提供**该构建路径 |
 
@@ -424,6 +433,10 @@ sudo ./install.sh
 
 > 完整说明（systemd 启用、跨机访问排查、Docker 示例、常见问题、卸载）见 **[windows/README.md](windows/README.md)**。
 > 产物包内也已包含 `windows/` 目录，离线场景同样可用。
+>
+> Windows 侧脚本统一用 **`.bat`（cmd）而非 PowerShell**：项目规则禁止 PowerShell 脚本，
+> 且 `.bat` 以 **GBK(ANSI)** 编码保存——cmd 默认代码页 936 正好按 GBK 解码，
+> 中文不会出现「UTF-8 被按 GBK 解码」的乱码。附带 `kill-memcached.bat` 用于停止服务。
 
 ## 升级流程（线上操作参考）
 
@@ -496,7 +509,7 @@ sudo systemctl start memcached
   RPM 包返回 **302 跳转**到 CDN，而 CentOS 7 自带的 yum 不跟随 302，会报
   `HTTP Error 302 - Found` / `No more mirrors to try` 导致镜像构建失败（该 302 时有时无，
   属间歇性故障）。本项目默认源已改为 CDN，并可自定义主源与备用源（主源失败自动回退）。
-- **libevent 源码下载**：镜像构建需要下载 libevent（默认 `2.1.12-stable`）。
+- **libevent 源码下载**：镜像构建需要下载 libevent（默认 `2.1.13-stable`）。
   优先走 GitHub release tarball，失败自动回退到 codeload 源码归档（此时用 `autogen.sh`
   现场生成 configure，镜像内已装 autoconf/automake/libtool）。内网环境可用
   `--build-arg LIBEVENT_URL=<镜像地址>`。
@@ -562,17 +575,22 @@ CI 中还会额外校验 tar 包完整性并输出产物清单。
 | 2 | `install.sh` 安装 + systemd 启动 | ✅ active，`memcached 1.6.45` |
 | 3 | set / get / delete / 多 key | ✅ 全部正确 |
 | 4 | UDP 禁用 | ✅ 无 UDP 监听 |
-| 5 | stats | ✅ `STAT libevent 2.1.12-stable`（静态链接生效） |
+| 5 | stats | ✅ `STAT libevent 2.1.12-stable`（静态链接生效；当时默认版本） |
 | 6 | **64KB 页运行** | ✅ `getconf PAGESIZE = 65536` 下正常运行（slab 分配器，无 jemalloc 陷阱，与文档结论一致） |
 | 7 | 重启后数据清空 | ✅ 符合预期 |
 | 8 | 同版本 `--check` | ✅ 判定无需更新 |
 | 9 | systemd 开机自启 | ✅ enabled |
 
+> 注：上表为 2026-10-31 的实测记录，当时默认 libevent 为 `2.1.12-stable`。
+> **1.1.0 起默认已升级到 `2.1.13-stable`**（含上游多项安全修复；已核对 memcached 并不使用
+> 受影响的 evhttp/evdns/evtag/evrpc 模块，故这些 CVE 在本产物中不可达，升级主要是为了
+> 让静态分发的 libevent 不被漏扫描报），并已由 CI 重新构建验证。
+
 ### 构建环境备注（QEMU 跨架构）
 
 在 x86_64 主机上用 QEMU 构建 aarch64 镜像时，**容器内访问 GitHub 可能长时间卡住**
 （宿主网络正常，模拟网络慢）。解决办法：先在宿主下载 libevent 源码，起一个本地 HTTP 源，
-再用 `--build-arg LIBEVENT_URL=http://<网桥网关>:<端口>/libevent-2.1.12-stable.tar.gz` 构建。
+再用 `--build-arg LIBEVENT_URL=http://<网桥网关>:<端口>/libevent-2.1.13-stable.tar.gz` 构建。
 Dockerfile 的 `URLS` 循环会把 `LIBEVENT_URL` 放在第一个尝试，命中后即不再访问外网。
 
 ## 版本记录
@@ -581,6 +599,37 @@ Dockerfile 的 `URLS` 循环会把 `LIBEVENT_URL` 放在第一个尝试，命中
 |---|---|---|
 | 1.0 | 2026-09~10 | 初始版本：x86_64 + aarch64 双架构、静态 libevent、自包含离线包、GitHub/CNB 双平台 CI |
 | 1.0.1 | 2026-10-31 | 文档：新增「真机验证记录」——x86_64 与 aarch64（麒麟 V10 / 64KB 页）全流程实测通过；补充 QEMU 跨架构构建的本地源用法 |
+| 1.1.0 | 2026-11-02 | **libevent 2.1.12 → 2.1.13-stable**（上游安全修复；已核对受影响模块 memcached 未使用，并移除 2.1.13 已删除的 `--disable-benchmark`）；新增 `VERSION` 文件作为项目版本唯一来源，CI 读它判断版本变化：变化则自动打 tag `v<版本>`、发 Release、推多架构 Docker 镜像，否则只验证；Windows 入口由 PowerShell 改为 `.bat`（GBK 编码，规避 cmd 936 乱码）并新增杀进程脚本；新增运行时镜像 `docker/Dockerfile` |
+
+## 版本号与自动化发布
+
+**`VERSION` 文件是项目版本号的唯一来源**（`install.sh`、CI、Release 都读它）。
+版本递增规则：初始 `1.0`；每次提交 `+0.0.1`；漏洞修复 `+0.1`；大改动/重写 `+1`。
+
+CI 行为（GitHub Actions 与 CNB 一致）：
+
+| 触发 | 版本号 | 行为 |
+|---|---|---|
+| push 到 `main` / `master` | 与已发布的 `v<版本>` **不同** | 构建双架构 → 打 tag `v<版本>` → 发 Release（并刷新 `latest`）→ 推多架构镜像 `:<版本>` 与 `:latest` |
+| push 到 `main` / `master` | 与已发布的 `v<版本>` **相同** | **只构建验证**（不发布、不推镜像） |
+| git tag `vMemcached-x.y.z` | — | 按 tag 名解析 memcached 版本，发布到同名 tag（固化） |
+| 手动触发 | — | 任意版本/libevent 模式/架构，发布到 `vMemcached-{版本}` |
+
+镜像地址：
+
+| 平台 | 镜像 |
+|---|---|
+| GitHub | `ghcr.io/jackch3n/memcached:<版本>` |
+| CNB | `docker.cnb.cool/jackch3n/memcached-docker-build:<版本>` |
+
+```bash
+# 拉取并运行（参数键名与 /etc/sysconfig/memcached 一致）
+docker pull ghcr.io/jackch3n/memcached:1.1.0
+docker run -d --name memcached -p 11211:11211 -e CACHESIZE=256 ghcr.io/jackch3n/memcached:1.1.0
+```
+
+> ⚠️ 运行时镜像是 **glibc 系**（debian）。产物是 glibc 链接的二进制，
+> **不要**把基础镜像换成 alpine（musl，会因缺少 `libc.so.6` 起不来）。
 
 ## 贡献指南
 
@@ -722,7 +771,7 @@ core relies on POSIX-only interfaces (`fork`/`setsid` in `daemon.c`, `pthread_cr
 
 Run this project's Linux artifacts instead — no extra build needed:
 
-- **WSL2 (recommended)**: `.\windows\memcached-wsl.ps1` one command installs everything; add
+- **WSL2 (recommended)**: `.\windows\memcached-wsl.bat` one command installs everything; add
   `-Tarball <file>` for offline use. Use the x86_64 package on x86_64 Windows and the aarch64
   package on ARM64 Windows.
 - **Docker Desktop**: mount the extracted package into any glibc-based image (not Alpine/musl).
@@ -755,7 +804,7 @@ inside every release tarball.
 > makes the artifact portable.
 
 Image-level build args: `OS_MIRROR`, `VAULT_PREFIX`, `DEVTOOLSET`, `DEVTOOLSET_MIRROR`,
-`DEVTOOLSET_MIRROR_FALLBACK`, `INSTALL_OPT_DEPS`, `LIBEVENT_VERSION` (default `2.1.12-stable`),
+`DEVTOOLSET_MIRROR_FALLBACK`, `INSTALL_OPT_DEPS`, `LIBEVENT_VERSION` (default `2.1.13-stable`),
 `LIBEVENT_URL`, `SKIP_LIBEVENT=yes`.
 
 ## Why libevent is statically linked
@@ -832,7 +881,7 @@ so it needs no `nc`/`telnet`.
 | 2 | `install.sh` + systemd start | ✅ active, memcached 1.6.45 |
 | 3 | set/get/delete/multi-key | ✅ all correct |
 | 4 | UDP disabled | ✅ no UDP listener |
-| 5 | stats | ✅ `STAT libevent 2.1.12-stable` (static link effective) |
+| 5 | stats | ✅ `STAT libevent 2.1.12-stable` (static link effective; default at that time) |
 | 6 | **64KB page operation** | ✅ runs normally with `getconf PAGESIZE = 65536` (slab allocator, no jemalloc trap — matches docs) |
 | 7 | data cleared after restart | ✅ as expected |
 | 8 | same-version `--check` | ✅ no update needed |
@@ -843,7 +892,7 @@ so it needs no `nc`/`telnet`.
 When building the aarch64 image on an x86_64 host under QEMU, **container access to GitHub can
 hang for a long time** (host network is fine, emulated network is slow). Workaround: download the
 libevent source on the host, serve it from a local HTTP server, then build with
-`--build-arg LIBEVENT_URL=http://<bridge-gateway>:<port>/libevent-2.1.12-stable.tar.gz`.
+`--build-arg LIBEVENT_URL=http://<bridge-gateway>:<port>/libevent-2.1.13-stable.tar.gz`.
 The Dockerfile's `URLS` loop tries `LIBEVENT_URL` first, so no external network is needed once hit.
 
 ## Version history
@@ -852,6 +901,33 @@ The Dockerfile's `URLS` loop tries `LIBEVENT_URL` first, so no external network 
 |---|---|---|
 | 1.0 | 2026-09~10 | Initial: x86_64 + aarch64, static libevent, self-contained offline packages, GitHub/CNB CI |
 | 1.0.1 | 2026-10-31 | Docs: real-machine validation record — full flow verified on x86_64 and aarch64 (Kylin V10 / 64KB pages); QEMU local-mirror usage |
+| 1.1.0 | 2026-11-02 | **libevent 2.1.12 → 2.1.13-stable** (upstream security fixes; verified memcached does not use the affected modules, and dropped `--disable-benchmark` which 2.1.13 removed); added a `VERSION` file as the single source of the project version — CI reads it and, when it changed, tags `v<version>`, publishes the Release and pushes multi-arch Docker images (otherwise verify only); Windows entry point moved from PowerShell to `.bat` (GBK-encoded to avoid cmd 936 mojibake) plus a kill script; added the runtime image `docker/Dockerfile` |
+
+## Versioning & automated publishing
+
+`VERSION` is the **single source of the project version** (`install.sh`, CI and Releases all read it).
+Increment rules: start at `1.0`; `+0.0.1` per commit; `+0.1` for a vulnerability fix; `+1` for a big
+change/rewrite.
+
+CI behaviour (GitHub Actions and CNB are consistent):
+
+| Trigger | Version | Behaviour |
+|---|---|---|
+| push to `main` / `master` | differs from the published `v<version>` | build both arches → tag `v<version>` → publish Release (and refresh `latest`) → push multi-arch images `:<version>` and `:latest` |
+| push to `main` / `master` | same as the published `v<version>` | **verify only** (no publish, no image) |
+| git tag `vMemcached-x.y.z` | — | resolve the memcached version from the tag, publish to that tag (frozen) |
+| manual dispatch | — | any version/libevent mode/arch, published as `vMemcached-{version}` |
+
+Images: `ghcr.io/jackch3n/memcached:<version>` (GitHub) and
+`docker.cnb.cool/jackch3n/memcached-docker-build:<version>` (CNB).
+
+```bash
+docker pull ghcr.io/jackch3n/memcached:1.1.0
+docker run -d --name memcached -p 11211:11211 -e CACHESIZE=256 ghcr.io/jackch3n/memcached:1.1.0
+```
+
+> ⚠️ The runtime image is **glibc-based** (debian). The artifact is a glibc-linked binary —
+> **do not** switch the base image to alpine (musl): it would fail with a missing `libc.so.6`.
 
 ## License
 

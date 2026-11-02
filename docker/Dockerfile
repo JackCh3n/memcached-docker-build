@@ -36,6 +36,7 @@ RUN set -eux; \
       install -m 0644 /opt/memcached-pkg/man/memcached.1 /usr/share/man/man1/memcached.1; \
     fi; \
     chmod 0755 /usr/local/bin/memcached-entrypoint; \
+    /bin/sh -n /usr/local/bin/memcached-entrypoint; \
     rm -rf /var/lib/apt/lists/*; \
     /usr/local/bin/memcached -V
 

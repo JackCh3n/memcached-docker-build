@@ -66,9 +66,6 @@ permissions:
   contents: write
   packages: write
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/memcached
-
 jobs:
   # ── 解析构建场景与版本（供矩阵复用） ──────────────────────────────
   prepare:
@@ -83,6 +80,7 @@ jobs:
       smoke: ${{ steps.resolve.outputs.smoke }}
       project_version: ${{ steps.ver.outputs.version }}
       version_changed: ${{ steps.ver.outputs.version_changed }}
+      image: ${{ steps.img.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -165,6 +163,17 @@ jobs:
           echo "::error::请在目标机（银河麒麟 V10 SP3 / UOS / EL8+，自带 OpenSSL 1.1.1）原生编译："
           echo "::error::    ./build-native.sh <版本> system yes"
           exit 1
+
+      # 镜像名必须全小写（Docker 强制要求），而 ${{ github.repository_owner }} 可能
+      # 含大写（如 JackCh3n），直接用会报 "repository name must be lowercase"。
+      - id: img
+        name: 计算镜像名（小写）
+        run: |
+          set -e
+          OWNER="${{ github.repository_owner }}"
+          IMG="ghcr.io/${OWNER,,}/memcached"
+          echo ">>> 镜像: ${IMG}"
+          echo "image=${IMG}" >> "$GITHUB_OUTPUT"
 
   # ── 构建（矩阵：x86_64 + aarch64） ─────────────────────────────────
   build:
@@ -295,6 +304,8 @@ jobs:
           steps.filter.outputs.skip == 'false' &&
           needs.prepare.outputs.scene == 'mainline' &&
           needs.prepare.outputs.version_changed == 'true'
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
         run: |
           set -e
           V="${{ needs.prepare.outputs.project_version }}"
@@ -315,6 +326,17 @@ jobs:
       needs.prepare.outputs.scene != 'mainline' ||
       needs.prepare.outputs.version_changed == 'true'
     runs-on: ubuntu-latest
+    # job 级 env：让所有步骤（含最后的「汇总」）都能拿到这些变量
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SCENE: ${{ needs.prepare.outputs.scene }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PROJECT_VERSION: ${{ needs.prepare.outputs.project_version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      LIBEVENT_MODE: ${{ needs.prepare.outputs.libevent }}
+      SASL_FLAG: ${{ needs.prepare.outputs.sasl }}
+      SECCOMP_FLAG: ${{ needs.prepare.outputs.seccomp }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -345,16 +367,6 @@ jobs:
           echo ">>> 已创建并推送 tag v$V"
 
       - name: 发布 Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SCENE: ${{ needs.prepare.outputs.scene }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          PROJECT_VERSION: ${{ needs.prepare.outputs.project_version }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-          LIBEVENT_MODE: ${{ needs.prepare.outputs.libevent }}
-          SASL_FLAG: ${{ needs.prepare.outputs.sasl }}
-          SECCOMP_FLAG: ${{ needs.prepare.outputs.seccomp }}
-          IMAGE: ${{ env.IMAGE }}
         run: |
           set -e
           ls -lh artifacts
@@ -465,9 +477,6 @@ jobs:
       # 把两个架构镜像合成一个多架构 manifest（amd64 + arm64）
       - name: 合并多架构镜像
         if: needs.prepare.outputs.scene == 'mainline'
-        env:
-          IMAGE: ${{ env.IMAGE }}
-          PROJECT_VERSION: ${{ needs.prepare.outputs.project_version }}
         run: |
           set -e
           docker login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"

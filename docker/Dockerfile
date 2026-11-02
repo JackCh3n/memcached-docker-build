@@ -16,8 +16,12 @@
 # 再用 MEMCACHED_* 环境变量覆盖——所以 docker run -e 就能改端口/内存。
 # =============================================================
 ARG BASE_IMAGE=debian:bookworm-slim
-ARG PKG_DIR=memcached-1.6.45-x86_64
 FROM ${BASE_IMAGE}
+
+# ⚠️ PKG_DIR 必须声明在 FROM **之后**：写在 FROM 之前的 ARG 只在 FROM 行可用，
+#    构建阶段里会是空值，导致 `COPY ${PKG_DIR}/ ...` 退化成 `COPY / ...`
+#    （把整个上下文根目录拷进去，然后在 install 阶段报找不到 memcached）。
+ARG PKG_DIR=memcached-1.6.45-x86_64
 
 LABEL org.opencontainers.image.title="memcached" \
       org.opencontainers.image.description="memcached built in a Docker-simulated CentOS 7 (glibc 2.17) environment" \
@@ -26,7 +30,14 @@ LABEL org.opencontainers.image.title="memcached" \
 COPY ${PKG_DIR}/ /opt/memcached-pkg/
 COPY docker/entrypoint.sh /usr/local/bin/memcached-entrypoint
 
+# 守卫：PKG_DIR 为空时 COPY 会退化成「拷贝整个上下文根目录」，然后在 install 阶段
+# 才报难懂的 cannot stat。这里第一时间给出可操作的错误。
 RUN set -eux; \
+    [ -s /opt/memcached-pkg/memcached ] || { \
+      echo "!! /opt/memcached-pkg/memcached 缺失：PKG_DIR='${PKG_DIR}' 未正确传入"; \
+      echo "!! 常见原因：ARG PKG_DIR 写在了 FROM 之前（那种 ARG 在构建阶段是空值）"; \
+      exit 1; \
+    }; \
     install -m 0755 /opt/memcached-pkg/memcached /usr/local/bin/memcached; \
     if [ -s /opt/memcached-pkg/memcached-tool ]; then \
       install -m 0755 /opt/memcached-pkg/memcached-tool /usr/local/bin/memcached-tool; \

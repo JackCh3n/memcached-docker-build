@@ -15,4 +15,6 @@ Dockerfile text eol=lf
 *.ps1 text eol=lf
 
 # .bat 用 CRLF：cmd 对纯 LF 的 goto/label 支持不稳
-*.bat text eol=crlf
+# working-tree-encoding=GBK：仓库内以 UTF-8 存储（GitHub/CNB 网页查看正常），
+# 检出到 Windows 工作区时转成 GBK —— cmd 默认代码页 936 直接正确显示中文。
+*.bat text eol=crlf working-tree-encoding=GBK

@@ -1,23 +1,23 @@
 @echo off
 rem =========================================================================
-rem memcached-wsl.bat - Windows ²àÒ»¼üÆô¶¯Æ÷£¨ÔÚ WSL2 Àï°²×° memcached£©
+rem memcached-wsl.bat - Windows ä¾§ä¸€é”®å¯åŠ¨å™¨ï¼ˆåœ¨ WSL2 é‡Œå®‰è£… memcachedï¼‰
 rem
-rem ¹æÔòËµÃ÷£º
-rem   * ½ûÖ¹Ê¹ÓÃ PowerShell ½Å±¾ -> ±¾½Å±¾Ö»ÓÃ cmd ÄÚ½¨ÃüÁî + wsl.exe
-rem   * ÖĞÎÄÂÒÂë -> ±¾ÎÄ¼şÒÔ GBK(ANSI) ±£´æ£»cmd Ä¬ÈÏ´úÂëÒ³ 936 ÕıºÃ°´ GBK ½âÂë£¬
-rem     ÖĞÎÄÖ±½ÓÕı³£ÏÔÊ¾¡£ÈôÒª²é¿´/±à¼­Ô´Âë£¬ÇëÓÃÖ§³Ö GBK µÄ±à¼­Æ÷£¨¼ÇÊÂ±¾/VS Code£©¡£
-rem   * ÏÈÉ±¾É½ø³Ì -> °²×°Ç°»áÏÈÍ£µô WSL ÄÚÕıÔÚÔËĞĞµÄ memcached£¬
-rem     ±ÜÃâ"ĞÂ¶ş½øÖÆ×°ºÃÁË¡¢¾É½ø³Ì»¹Õ¼×Å¶Ë¿Ú"µÄ¼Ù³É¹¦
+rem è§„åˆ™è¯´æ˜ï¼š
+rem   * ç¦æ­¢ä½¿ç”¨ PowerShell è„šæœ¬ -> æœ¬è„šæœ¬åªç”¨ cmd å†…å»ºå‘½ä»¤ + wsl.exe
+rem   * ä¸­æ–‡ä¹±ç  -> æœ¬æ–‡ä»¶ä»¥ GBK(ANSI) ä¿å­˜ï¼›cmd é»˜è®¤ä»£ç é¡µ 936 æ­£å¥½æŒ‰ GBK è§£ç ï¼Œ
+rem     ä¸­æ–‡ç›´æ¥æ­£å¸¸æ˜¾ç¤ºã€‚è‹¥è¦æŸ¥çœ‹/ç¼–è¾‘æºç ï¼Œè¯·ç”¨æ”¯æŒ GBK çš„ç¼–è¾‘å™¨ï¼ˆè®°äº‹æœ¬/VS Codeï¼‰ã€‚
+rem   * å…ˆæ€æ—§è¿›ç¨‹ -> å®‰è£…å‰ä¼šå…ˆåœæ‰ WSL å†…æ­£åœ¨è¿è¡Œçš„ memcachedï¼Œ
+rem     é¿å…"æ–°äºŒè¿›åˆ¶è£…å¥½äº†ã€æ—§è¿›ç¨‹è¿˜å ç€ç«¯å£"çš„å‡æˆåŠŸ
 rem
-rem ÓÃ·¨£º
-rem   memcached-wsl.bat                        ×Ô¶¯ÏÂÔØ×îĞÂ²úÎï°ü²¢°²×°
-rem   memcached-wsl.bat --tarball <°üÂ·¾¶>      ÓÃ±¾µØ°ü°²×°£¨ÀëÏß/ÄÚÍø£©
-rem   memcached-wsl.bat --port 16312            Ö¸¶¨¹¦ÄÜÑéÖ¤¶Ë¿Ú
-rem   memcached-wsl.bat --distro Ubuntu-22.04   Ö¸¶¨ WSL ·¢ĞĞ°æ
-rem   memcached-wsl.bat --no-start              Ö»°²×°£¬²»Æô¶¯·şÎñ
-rem   memcached-wsl.bat --help                  ÏÔÊ¾±¾°ïÖú
+rem ç”¨æ³•ï¼š
+rem   memcached-wsl.bat                        è‡ªåŠ¨ä¸‹è½½æœ€æ–°äº§ç‰©åŒ…å¹¶å®‰è£…
+rem   memcached-wsl.bat --tarball <åŒ…è·¯å¾„>      ç”¨æœ¬åœ°åŒ…å®‰è£…ï¼ˆç¦»çº¿/å†…ç½‘ï¼‰
+rem   memcached-wsl.bat --port 16312            æŒ‡å®šåŠŸèƒ½éªŒè¯ç«¯å£
+rem   memcached-wsl.bat --distro Ubuntu-22.04   æŒ‡å®š WSL å‘è¡Œç‰ˆ
+rem   memcached-wsl.bat --no-start              åªå®‰è£…ï¼Œä¸å¯åŠ¨æœåŠ¡
+rem   memcached-wsl.bat --help                  æ˜¾ç¤ºæœ¬å¸®åŠ©
 rem
-rem ²úÎï°ü¿É´Ó GitHub / CNB µÄ Release Ò³ÃæÏÂÔØ£»--tarball ´« Windows Â·¾¶¡£
+rem äº§ç‰©åŒ…å¯ä» GitHub / CNB çš„ Release é¡µé¢ä¸‹è½½ï¼›--tarball ä¼  Windows è·¯å¾„ã€‚
 rem =========================================================================
 setlocal EnableExtensions EnableDelayedExpansion
 
@@ -27,21 +27,21 @@ set "TARBALL="
 set "EXTRA="
 set "HERE=%~dp0"
 
-rem ---------------------------------------------------------------- ²ÎÊı½âÎö
+rem ---------------------------------------------------------------- å‚æ•°è§£æ
 :parse
 if "%~1"=="" goto parsed
 if /i "%~1"=="--tarball" (
-    if "%~2"=="" ( echo [´íÎó] --tarball ĞèÒª²ÎÊı & goto usage )
+    if "%~2"=="" ( echo [é”™è¯¯] --tarball éœ€è¦å‚æ•° & goto usage )
     set "TARBALL=%~2"
     shift & shift & goto parse
 )
 if /i "%~1"=="--port" (
-    if "%~2"=="" ( echo [´íÎó] --port ĞèÒª²ÎÊı & goto usage )
+    if "%~2"=="" ( echo [é”™è¯¯] --port éœ€è¦å‚æ•° & goto usage )
     set "PORT=%~2"
     shift & shift & goto parse
 )
 if /i "%~1"=="--distro" (
-    if "%~2"=="" ( echo [´íÎó] --distro ĞèÒª²ÎÊı & goto usage )
+    if "%~2"=="" ( echo [é”™è¯¯] --distro éœ€è¦å‚æ•° & goto usage )
     set "DISTRO=%~2"
     shift & shift & goto parse
 )
@@ -51,70 +51,70 @@ if /i "%~1"=="--no-start" (
 )
 if /i "%~1"=="--help" goto usage
 if /i "%~1"=="-h" goto usage
-echo [´íÎó] Î´Öª²ÎÊı: %~1
+echo [é”™è¯¯] æœªçŸ¥å‚æ•°: %~1
 goto usage
 :parsed
 
-rem ------------------------------------------------------- 1) ¼ì²é WSL ÊÇ·ñ¿ÉÓÃ
-echo ==^> µÚ 1 ²½£º¼ì²é WSL
+rem ------------------------------------------------------- 1) æ£€æŸ¥ WSL æ˜¯å¦å¯ç”¨
+echo ==^> ç¬¬ 1 æ­¥ï¼šæ£€æŸ¥ WSL
 where wsl.exe >nul 2>nul
 if errorlevel 1 (
-    echo [´íÎó] Î´ÕÒµ½ wsl.exe¡£ÇëÏÈ°²×° WSL2£ºwsl --install
-    echo        ÈôÒÑ°²×°ÈÔ±¨´í£¬Í¨³£ÊÇÈ± WSL2 ÄÚºË£¬ÇëÔÚ¹ÜÀíÔ± PowerShell ÀïÖ´ĞĞ£º
+    echo [é”™è¯¯] æœªæ‰¾åˆ° wsl.exeã€‚è¯·å…ˆå®‰è£… WSL2ï¼šwsl --install
+    echo        è‹¥å·²å®‰è£…ä»æŠ¥é”™ï¼Œé€šå¸¸æ˜¯ç¼º WSL2 å†…æ ¸ï¼Œè¯·åœ¨ç®¡ç†å‘˜ PowerShell é‡Œæ‰§è¡Œï¼š
     echo            wsl --update
     exit /b 1
 )
 
-rem wsl µ÷ÓÃÇ°×º£¨¿ÉÖ¸¶¨·¢ĞĞ°æ£©
+rem wsl è°ƒç”¨å‰ç¼€ï¼ˆå¯æŒ‡å®šå‘è¡Œç‰ˆï¼‰
 set "WSLPRE=wsl"
 if not "%DISTRO%"=="" set "WSLPRE=wsl -d %DISTRO%"
 
 %WSLPRE% -- bash -lc "echo WSL-OK" >nul 2>&1
 if errorlevel 1 (
-    echo [´íÎó] WSL ·¢ĞĞ°æÎŞ·¨Æô¶¯¡£×î³£¼ûÔ­ÒòÊÇÈ± WSL2 ÄÚºË£¬ÇëÖ´ĞĞ£ºwsl --update
-    echo        Ò²¿ÉÒÔÏÈ¿´×´Ì¬£ºwsl --status / wsl -l -v
+    echo [é”™è¯¯] WSL å‘è¡Œç‰ˆæ— æ³•å¯åŠ¨ã€‚æœ€å¸¸è§åŸå› æ˜¯ç¼º WSL2 å†…æ ¸ï¼Œè¯·æ‰§è¡Œï¼šwsl --update
+    echo        ä¹Ÿå¯ä»¥å…ˆçœ‹çŠ¶æ€ï¼šwsl --status / wsl -l -v
     exit /b 1
 )
-echo [ĞÅÏ¢] WSL ¿ÉÓÃ
+echo [ä¿¡æ¯] WSL å¯ç”¨
 
-rem ------------------------------------------- 2) °Ñ wsl-install.sh ¸´ÖÆ½ø WSL
-echo ==^> µÚ 2 ²½£º×¼±¸°²×°½Å±¾
+rem ------------------------------------------- 2) æŠŠ wsl-install.sh å¤åˆ¶è¿› WSL
+echo ==^> ç¬¬ 2 æ­¥ï¼šå‡†å¤‡å®‰è£…è„šæœ¬
 set "HELPER="
 for /f "delims=" %%i in ('%WSLPRE% -- wslpath -a "%HERE%wsl-install.sh" 2^>nul') do set "HELPER=%%i"
 if "%HELPER%"=="" (
-    echo [´íÎó] Î´ÕÒµ½ wsl-install.sh£¨Ó¦Óë±¾½Å±¾Í¬Ä¿Â¼£¬¼´ÔÚ²Ö¿â/²úÎï°üµÄ windows Ä¿Â¼ÏÂ£©
+    echo [é”™è¯¯] æœªæ‰¾åˆ° wsl-install.shï¼ˆåº”ä¸æœ¬è„šæœ¬åŒç›®å½•ï¼Œå³åœ¨ä»“åº“/äº§ç‰©åŒ…çš„ windows ç›®å½•ä¸‹ï¼‰
     exit /b 1
 )
 %WSLPRE% -- bash -lc "mkdir -p ~/memcached-pkg"
 %WSLPRE% -- bash -lc "cp -f '%HELPER%' ~/memcached-pkg/wsl-install.sh"
 if errorlevel 1 (
-    echo [´íÎó] ¸´ÖÆ°²×°½Å±¾µ½ WSL Ê§°Ü
+    echo [é”™è¯¯] å¤åˆ¶å®‰è£…è„šæœ¬åˆ° WSL å¤±è´¥
     exit /b 1
 )
 
-rem ------------------------------------- 3) ÏÈÍ£µô¾É½ø³Ì£¨±ÜÃâ¶Ë¿Ú±»¾É½ø³ÌÕ¼ÓÃ£©
-echo ==^> µÚ 3 ²½£ºÍ£Ö¹¿ÉÄÜÕıÔÚÔËĞĞµÄ¾É memcached
-%WSLPRE% -- bash -lc "if systemctl is-active memcached >/dev/null 2>&1; then sudo systemctl stop memcached; echo '[ĞÅÏ¢] ÒÑÍ¨¹ı systemd Í£Ö¹'; elif [ -f /run/memcached.pid ]; then sudo kill \"$(cat /run/memcached.pid)\" 2>/dev/null; rm -f /run/memcached.pid; echo '[ĞÅÏ¢] ÒÑ°´ pid ÎÄ¼şÍ£Ö¹'; else echo '[ĞÅÏ¢] Ã»ÓĞ¼ì²âµ½ÔËĞĞÖĞµÄ memcached'; fi"
+rem ------------------------------------- 3) å…ˆåœæ‰æ—§è¿›ç¨‹ï¼ˆé¿å…ç«¯å£è¢«æ—§è¿›ç¨‹å ç”¨ï¼‰
+echo ==^> ç¬¬ 3 æ­¥ï¼šåœæ­¢å¯èƒ½æ­£åœ¨è¿è¡Œçš„æ—§ memcached
+%WSLPRE% -- bash -lc "if systemctl is-active memcached >/dev/null 2>&1; then sudo systemctl stop memcached; echo '[ä¿¡æ¯] å·²é€šè¿‡ systemd åœæ­¢'; elif [ -f /run/memcached.pid ]; then sudo kill \"$(cat /run/memcached.pid)\" 2>/dev/null; rm -f /run/memcached.pid; echo '[ä¿¡æ¯] å·²æŒ‰ pid æ–‡ä»¶åœæ­¢'; else echo '[ä¿¡æ¯] æ²¡æœ‰æ£€æµ‹åˆ°è¿è¡Œä¸­çš„ memcached'; fi"
 
-rem ------------------------------------------------------- 4) ×é×°²¢Ö´ĞĞ°²×°ÃüÁî
-echo ==^> µÚ 4 ²½£º°²×°²¢ÑéÖ¤
-echo [ĞÅÏ¢] °²×°ĞèÒª sudo È¨ÏŞ£¬ÈôÌáÊ¾ [sudo] password ÇëÊäÈë WSL ÓÃ»§ÃÜÂë
+rem ------------------------------------------------------- 4) ç»„è£…å¹¶æ‰§è¡Œå®‰è£…å‘½ä»¤
+echo ==^> ç¬¬ 4 æ­¥ï¼šå®‰è£…å¹¶éªŒè¯
+echo [ä¿¡æ¯] å®‰è£…éœ€è¦ sudo æƒé™ï¼Œè‹¥æç¤º [sudo] password è¯·è¾“å…¥ WSL ç”¨æˆ·å¯†ç 
 
 if not "%TARBALL%"=="" (
     if not exist "%TARBALL%" (
-        echo [´íÎó] Ö¸¶¨µÄ²úÎï°ü²»´æÔÚ: %TARBALL%
+        echo [é”™è¯¯] æŒ‡å®šçš„äº§ç‰©åŒ…ä¸å­˜åœ¨: %TARBALL%
         exit /b 1
     )
     set "WSLTAR="
     for /f "delims=" %%i in ('%WSLPRE% -- wslpath -a "%TARBALL%" 2^>nul') do set "WSLTAR=%%i"
     if "!WSLTAR!"=="" (
-        echo [´íÎó] ÎŞ·¨°Ñ²úÎï°üÂ·¾¶×ª»»Îª WSL Â·¾¶
+        echo [é”™è¯¯] æ— æ³•æŠŠäº§ç‰©åŒ…è·¯å¾„è½¬æ¢ä¸º WSL è·¯å¾„
         exit /b 1
     )
-    echo [ĞÅÏ¢] Ê¹ÓÃ±¾µØ²úÎï°ü: %TARBALL%
+    echo [ä¿¡æ¯] ä½¿ç”¨æœ¬åœ°äº§ç‰©åŒ…: %TARBALL%
     set "CMD=bash ~/memcached-pkg/wsl-install.sh --tarball '!WSLTAR!' --port %PORT%!EXTRA!"
 ) else (
-    echo [ĞÅÏ¢] Î´Ö¸¶¨ --tarball£¬½«´Ó GitHub Release ×Ô¶¯ÏÂÔØ±¾¼Ü¹¹²úÎï°ü
+    echo [ä¿¡æ¯] æœªæŒ‡å®š --tarballï¼Œå°†ä» GitHub Release è‡ªåŠ¨ä¸‹è½½æœ¬æ¶æ„äº§ç‰©åŒ…
     set "CMD=bash ~/memcached-pkg/wsl-install.sh --auto --port %PORT%!EXTRA!"
 )
 
@@ -124,22 +124,22 @@ set "RC=%errorlevel%"
 echo.
 if "%RC%"=="0" (
     echo ============================================================
-    echo  Íê³É£ºmemcached ÒÑÔÚ WSL ÄÚ°²×°²¢¿ÉÓÃ
+    echo  å®Œæˆï¼šmemcached å·²åœ¨ WSL å†…å®‰è£…å¹¶å¯ç”¨
     echo ============================================================
-    echo   ´Ó Windows ·ÃÎÊ£¨WSL2 Ä¬ÈÏ¿ªÆô localhostForwarding£©£º
+    echo   ä» Windows è®¿é—®ï¼ˆWSL2 é»˜è®¤å¼€å¯ localhostForwardingï¼‰ï¼š
     echo       127.0.0.1:%PORT%
-    echo   Æô¶¯²ÎÊıÔÚ WSL ÄÚµÄ /etc/sysconfig/memcached
-    echo   Í£Ö¹·şÎñ£ºkill-memcached.bat
-    echo   Ğ¶ÔØ£º½øÈë WSL µÄ ~/memcached-pkg/ ºóÖ´ĞĞ sudo ./install.sh --uninstall
+    echo   å¯åŠ¨å‚æ•°åœ¨ WSL å†…çš„ /etc/sysconfig/memcached
+    echo   åœæ­¢æœåŠ¡ï¼škill-memcached.bat
+    echo   å¸è½½ï¼šè¿›å…¥ WSL çš„ ~/memcached-pkg/ åæ‰§è¡Œ sudo ./install.sh --uninstall
 ) else (
-    echo [¾¯¸æ] °²×°Á÷³Ì·µ»Ø·Ç 0 ^(exit=%RC%^)£¬Çë²é¿´ÉÏ·½ WSL Êä³ö¶¨Î»ÎÊÌâ
+    echo [è­¦å‘Š] å®‰è£…æµç¨‹è¿”å›é 0 ^(exit=%RC%^)ï¼Œè¯·æŸ¥çœ‹ä¸Šæ–¹ WSL è¾“å‡ºå®šä½é—®é¢˜
 )
 exit /b %RC%
 
 :usage
-echo ÓÃ·¨: %~nx0 [--tarball ^<°üÂ·¾¶^>] [--port ^<n^>] [--distro ^<Ãû³Æ^>] [--no-start]
-echo   --tarball ^<°üÂ·¾¶^>   ÓÃ±¾µØ²úÎï°ü°²×°£¨ÀëÏß/ÄÚÍø£©£»²»´«Ôò×Ô¶¯´Ó Release ÏÂÔØ
-echo   --port ^<n^>          ¹¦ÄÜÑéÖ¤¶Ë¿Ú£¬Ä¬ÈÏ 16311
-echo   --distro ^<Ãû³Æ^>     Ö¸¶¨ WSL ·¢ĞĞ°æ£¨wsl -l -v Àï¿´µ½µÄ NAME£©
-echo   --no-start           Ö»°²×°£¬²»Æô¶¯·şÎñ
+echo ç”¨æ³•: %~nx0 [--tarball ^<åŒ…è·¯å¾„^>] [--port ^<n^>] [--distro ^<åç§°^>] [--no-start]
+echo   --tarball ^<åŒ…è·¯å¾„^>   ç”¨æœ¬åœ°äº§ç‰©åŒ…å®‰è£…ï¼ˆç¦»çº¿/å†…ç½‘ï¼‰ï¼›ä¸ä¼ åˆ™è‡ªåŠ¨ä» Release ä¸‹è½½
+echo   --port ^<n^>          åŠŸèƒ½éªŒè¯ç«¯å£ï¼Œé»˜è®¤ 16311
+echo   --distro ^<åç§°^>     æŒ‡å®š WSL å‘è¡Œç‰ˆï¼ˆwsl -l -v é‡Œçœ‹åˆ°çš„ NAMEï¼‰
+echo   --no-start           åªå®‰è£…ï¼Œä¸å¯åŠ¨æœåŠ¡
 exit /b 1

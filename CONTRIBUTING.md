@@ -135,10 +135,18 @@ Three hard rules for the Windows helpers:
 1. **No PowerShell.** The Windows entry point is `windows/memcached-wsl.bat` — plain `cmd`
    builtins plus `wsl.exe`. Do not reintroduce a `.ps1`; keep the download/JSON parsing inside
    `wsl-install.sh` (runs in WSL, where bash/curl/grep/sed exist) rather than in the `.bat`.
-2. **Save `.bat` as GBK (ANSI).** `cmd` runs with code page 936 and decodes bytes as GBK, so a
-   UTF-8 `.bat` renders as mojibake — the classic "UTF-8 bytes decoded as GBK" problem. Edit
-   `.bat` files with a GBK-capable editor (Notepad / VS Code); `.gitattributes` pins `*.bat` to
-   `eol=crlf` because `cmd` is unreliable with LF-only line endings.
+2. **`.bat` uses git `working-tree-encoding` to carry two encodings.** `.gitattributes` pins
+   `*.bat text eol=crlf working-tree-encoding=GBK`: the **repository blob is UTF-8** (so GitHub /
+   CNB web view, VS Code and grep render it correctly), while the **Windows working tree is GBK**
+   (so `cmd` with code page 936 displays Chinese properly). After editing a `.bat`, run
+   `git add --renormalize windows/` so the blob is re-encoded to UTF-8.
+
+   Two approaches are known **not** to work — do not reintroduce them:
+   - **UTF-8 + BOM**: `cmd` does not accept a UTF-8 BOM in `.bat`; it treats the BOM as part of the
+     first command (`'ï»¿@echo' is not recognized`).
+   - **UTF-8 + `chcp 65001` inside the batch file**: `cmd` reads batch files in blocks, so switching
+     the code page mid-file makes it continue at an offset computed under the old code page — lines
+     get truncated and comment fragments are executed as commands (and stray files get created).
 3. `windows/` is copied into every package by all three packagers, like `assets/` — keep that in
    sync. `wsl-install.sh` deliberately re-implements the protocol probe (subshell-isolated
    `/dev/tcp`, CR stripping); if you change that pattern in `build-memcached.sh`, change it here

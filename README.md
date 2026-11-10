@@ -434,9 +434,10 @@ sudo ./install.sh
 > 完整说明（systemd 启用、跨机访问排查、Docker 示例、常见问题、卸载）见 **[windows/README.md](windows/README.md)**。
 > 产物包内也已包含 `windows/` 目录，离线场景同样可用。
 >
-> Windows 侧脚本统一用 **`.bat`（cmd）而非 PowerShell**：项目规则禁止 PowerShell 脚本，
-> 且 `.bat` 以 **GBK(ANSI)** 编码保存——cmd 默认代码页 936 正好按 GBK 解码，
-> 中文不会出现「UTF-8 被按 GBK 解码」的乱码。附带 `kill-memcached.bat` 用于停止服务。
+> Windows 侧脚本统一用 **`.bat`（cmd）而非 PowerShell**：项目规则禁止 PowerShell 脚本。
+> `.bat` 通过 `.gitattributes` 的 `working-tree-encoding=GBK` 做双编码——**仓库里存 UTF-8**
+> （GitHub / CNB 网页、VS Code 查看正常），**检出到 Windows 时转 GBK**（cmd 代码页 936
+> 直接正确显示）。附带 `kill-memcached.bat` 用于停止服务。
 
 ## 升级流程（线上操作参考）
 
@@ -600,6 +601,7 @@ Dockerfile 的 `URLS` 循环会把 `LIBEVENT_URL` 放在第一个尝试，命中
 | 1.0 | 2026-09~10 | 初始版本：x86_64 + aarch64 双架构、静态 libevent、自包含离线包、GitHub/CNB 双平台 CI |
 | 1.0.1 | 2026-10-31 | 文档：新增「真机验证记录」——x86_64 与 aarch64（麒麟 V10 / 64KB 页）全流程实测通过；补充 QEMU 跨架构构建的本地源用法 |
 | 1.1.0 | 2026-11-02 | **libevent 2.1.12 → 2.1.13-stable**（上游安全修复；已核对受影响模块 memcached 未使用，并移除 2.1.13 已删除的 `--disable-benchmark`）；新增 `VERSION` 文件作为项目版本唯一来源，CI 读它判断版本变化：变化则自动打 tag `v<版本>`、发 Release、推多架构 Docker 镜像，否则只验证；Windows 入口由 PowerShell 改为 `.bat`（GBK 编码，规避 cmd 936 乱码）并新增杀进程脚本；新增运行时镜像 `docker/Dockerfile` |
+| 1.1.1 | 2026-11-10 | 修复 CNB/GitHub 网页端 Windows `.bat` 显示乱码：改用 git `working-tree-encoding=GBK`（仓库存 UTF-8、检出转 GBK），cmd 与网页端同时正常；文档记录已实测否掉的 UTF-8+BOM 与 `chcp 65001` 两条弯路 |
 
 ## 版本号与自动化发布
 
@@ -902,6 +904,7 @@ The Dockerfile's `URLS` loop tries `LIBEVENT_URL` first, so no external network 
 | 1.0 | 2026-09~10 | Initial: x86_64 + aarch64, static libevent, self-contained offline packages, GitHub/CNB CI |
 | 1.0.1 | 2026-10-31 | Docs: real-machine validation record — full flow verified on x86_64 and aarch64 (Kylin V10 / 64KB pages); QEMU local-mirror usage |
 | 1.1.0 | 2026-11-02 | **libevent 2.1.12 → 2.1.13-stable** (upstream security fixes; verified memcached does not use the affected modules, and dropped `--disable-benchmark` which 2.1.13 removed); added a `VERSION` file as the single source of the project version — CI reads it and, when it changed, tags `v<version>`, publishes the Release and pushes multi-arch Docker images (otherwise verify only); Windows entry point moved from PowerShell to `.bat` (GBK-encoded to avoid cmd 936 mojibake) plus a kill script; added the runtime image `docker/Dockerfile` |
+| 1.1.1 | 2026-11-10 | Fix mojibake for the Windows `.bat` files on CNB/GitHub web: switched to git `working-tree-encoding=GBK` (UTF-8 in the repo, GBK on checkout) so cmd and the web view are both correct; documented the two rejected approaches (UTF-8+BOM, `chcp 65001`) |
 
 ## Versioning & automated publishing
 

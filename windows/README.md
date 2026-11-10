@@ -184,10 +184,22 @@ cd ~/memcached-pkg/memcached-1.6.45-<架构> && sudo ./install.sh --uninstall
 
 1. **禁止 PowerShell 脚本**：Windows 入口一律用 `.bat`（cmd 内建命令 + `wsl.exe`），
    不引入 PowerShell 依赖。
-2. **中文不能乱码**：`.bat` 以 **GBK(ANSI)** 编码保存——cmd 默认代码页 936 正好按 GBK
-   解码，中文直接正常显示。若用 UTF-8 保存，就会被按 GBK 解码成乱码
-   （这正是「UTF-8 字节被按 GBK 解码」的典型场景）。因此查看/编辑 `.bat` 请用支持
-   GBK 的编辑器（记事本 / VS Code），不要用会强制转 UTF-8 的工具。
+2. **中文不能乱码**：`.bat` 用 git 的 `working-tree-encoding` 做双编码：
+   - **仓库里存 UTF-8** → GitHub / CNB 网页查看、VS Code、grep 全部正常
+   - **检出到 Windows 时转 GBK** → cmd 默认代码页 936 直接正确显示中文
+
+   配置在 `.gitattributes`：`*.bat text eol=crlf working-tree-encoding=GBK`。
+
+   ⚠️ 编辑 `.bat` 时注意：工作区里是 GBK 字节，若编辑器把它另存为 UTF-8，
+   cmd 下会变回乱码。请用能保留 GBK 的编辑器（记事本 / VS Code 需确认编码显示为
+   GBK/ANSI），或改完后用 `git add --renormalize windows/` 让 git 重新按
+   `working-tree-encoding` 处理。
+
+   已实测否掉的两条弯路（不要再试）：
+   - **UTF-8 + BOM**：cmd 不支持 `.bat` 的 UTF-8 BOM，会把 BOM 当命令的一部分
+     （报 `'ï»¿@echo' 不是内部或外部命令`）。
+   - **UTF-8 + 批处理内 `chcp 65001`**：cmd 按块读取批处理文件，中途切代码页后会按
+     旧代码页的偏移继续读，导致行被截断、注释残句被当命令执行（还会误建垃圾文件）。
 
 > `wsl-install.sh --auto` 的下载与 JSON 解析都放在 **WSL 内**做（bash/curl/grep/sed 现成），
 > 这样 Windows 侧既不用解析 JSON，也不会碰到编码问题。
